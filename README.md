@@ -28,9 +28,10 @@ a new generation lands.
 
 ## Quick start
 
-1. Download `life-clock.exe` from the [latest release](https://github.com/Dheirav/ConwayClock/releases/latest), or copy the `native` folder from a build.
-2. Double-click `life-clock.exe`. It syncs to the current time in a second
-   or two and appears behind your desktop icons.
+1. Download `life-clock.exe` from the [latest release](https://github.com/Dheirav/ConwayClock/releases/latest).
+2. Double-click it. It syncs to the current time in a second or two and
+   appears behind your desktop icons. Run it with `--setup` to install it
+   properly, with shortcuts and an entry in Installed apps.
 3. Right-click the tray icon for Settings (colours, size, position, frame
    rate; changes apply live), Pause, Watch full screen
    (a window at 1/4 zoom where you can see the gliders), Start with Windows

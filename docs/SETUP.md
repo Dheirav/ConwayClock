@@ -7,10 +7,19 @@ no installer, no runtime, no admin rights.
 
 ## Install
 
-Copy `native/` to a folder of your choice, for example
-`C:\Users\you\Pictures\life-clock\native\`. The program writes three files
-next to itself: `life-clock.ini` (settings), `life-clock.log` (today's log)
-and `life-clock.prev.log` (yesterday's).
+Run `life-clock.exe --setup` (or Install on this PC in the tray menu). The
+setup window offers to copy it into `%LOCALAPPDATA%\LifeClock`, add Start
+menu and startup shortcuts, and optionally set it as the screensaver. It
+registers an uninstall entry, so it appears in Settings > Apps > Installed
+apps like any other program, and Uninstall in the same window (or
+`life-clock.exe --uninstall`) removes everything it added.
+
+`--install` and `--uninstall` do the same silently, for scripts.
+
+Installing is optional: the executable is self-contained and runs from
+wherever you put it. It writes three files next to itself: `life-clock.ini`
+(settings), `life-clock.log` (today's log) and `life-clock.prev.log`
+(yesterday's).
 
 ## Run
 
@@ -41,7 +50,8 @@ in that dialog opens the settings window.
 
 While running, an amber clock icon sits in the notification area (it may be
 in the overflow behind the ^ arrow). Right-click it for: Pause / Resume,
-Watch full screen, Settings, Open log, Start with Windows, Quit.
+Watch full screen, Settings, Open log, Start with Windows, Install on
+this PC (until it is installed), Quit.
 
 ## Watch mode
 
@@ -92,7 +102,12 @@ as `--key value`, which overrides the file.
 | `hpos` | 0.5 | Where the digits' centre sits horizontally, as a fraction of the screen width |
 | `vpos` | 0.5 | Same vertically. At 0.5 the top of the machine is cropped; 0.78 shows all of it |
 | `monitor` | 0 | Monitor index, 0 = primary. Multi-monitor is untested |
-| `palette` | amber | `amber`, `green`, `white`, `blue` or `red` |
+| `theme` | off | Day/night switching. `off` uses the single palette below. `clock` switches at `day_start` and `night_start`. `system` follows the Windows light/dark app theme |
+| `day_start`, `night_start` | 7, 19 | Hours at which day and night begin, when `theme = clock` |
+| `day_palette`, `night_palette` | white, amber | A preset name or an RRGGBB colour for each half of the day |
+| `day_gain`, `night_gain` | 40, 22 | Brightness for each; night is dimmer by default |
+| `fade` | 3 | Seconds the change from one to the other takes. 0 is instant |
+| `palette` | amber | Used when `theme = off`: `amber`, `green`, `white`, `blue` or `red` |
 | `bg`, `cells` | | Your own background and cell colours as RRGGBB; override the palette |
 | `cells2` | none | If set, the densest areas fade from `cells` to this colour |
 | `gain` | 40 | Brightness of a single live cell in a zoomed-out pixel, 5 to 120 |

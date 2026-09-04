@@ -12,6 +12,7 @@
 //   life-clock.exe --fullscreen 1        watch mode: a normal window at 1/4 zoom, Esc closes
 //   life-clock.exe --install-startup | --uninstall-startup   add/remove the Startup-folder shortcut
 //   life-clock.exe --settings            the settings window (also from the tray menu)
+//   life-clock.exe --setup | --install | --uninstall   install into %LOCALAPPDATA%\LifeClock
 //   life-clock.exe [--fps N] [--battery_fps N] [--view whole|display] [--palette NAME]
 //                  [--bg RRGGBB] [--cells RRGGBB] [--cells2 RRGGBB] [--gain N]
 //                  [--size F] [--hpos F] [--vpos F] [--monitor N] [--status 0|1]
@@ -32,6 +33,7 @@
 #include "inflate.h"
 #include "colon.h"
 #include "settings.h"
+#include "install.h"
 
 extern const int SNAP_COUNT; extern const int SNAP_MINUTE[]; extern const size_t SNAP_OFF[]; extern const unsigned char SNAP_DATA[];
 
@@ -42,8 +44,10 @@ extern const int SNAP_COUNT; extern const int SNAP_MINUTE[]; extern const size_t
 #define PAT_H 6796
 static const struct { int x, y, w, h; } DISPLAY = { 1900, 3950, 8000, 2850 };
 
-static struct { int fps, batteryFps, view, gain, status, attach, monitor, pmMode, colonMode, zoom, fullscreen, screensaver, tour, highlight, frames, frameStep; double vpos, hpos, size, afterglow; DWORD hot; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; } cfg;
-static void cfg_defaults(void) { memset(&cfg, 0, sizeof cfg); cfg.pmMode = 3; cfg.colonMode = 1; cfg.tour = -1; cfg.hot = 0xffe9c8; /* BGR: light cyan-white */ cfg.fps = 6; cfg.batteryFps = 3; cfg.gain = 40; cfg.attach = 7; cfg.vpos = 0.5; cfg.hpos = 0.5; cfg.size = 1.0; cfg.bg = 0x0f0907; cfg.cells = 0xa8e9ff; strcpy(cfg.palette, "amber"); }
+static struct { int fps, batteryFps, view, gain, status, attach, monitor, pmMode, colonMode, zoom, fullscreen, screensaver, tour, highlight, frames, frameStep;
+  int theme, dayStart, nightStart, dayGain, nightGain; double fadeSec; char dayPalette[16], nightPalette[16]; double vpos, hpos, size, afterglow; DWORD hot; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; } cfg;
+static void cfg_defaults(void) { memset(&cfg, 0, sizeof cfg); cfg.pmMode = 3; cfg.colonMode = 1; cfg.tour = -1; cfg.hot = 0xffe9c8; /* BGR: light cyan-white */
+  cfg.dayStart = 7; cfg.nightStart = 19; cfg.dayGain = 40; cfg.nightGain = 22; cfg.fadeSec = 3; strcpy(cfg.dayPalette, "white"); strcpy(cfg.nightPalette, "amber"); cfg.fps = 6; cfg.batteryFps = 3; cfg.gain = 40; cfg.attach = 7; cfg.vpos = 0.5; cfg.hpos = 0.5; cfg.size = 1.0; cfg.bg = 0x0f0907; cfg.cells = 0xa8e9ff; strcpy(cfg.palette, "amber"); }
 static int g_argc; static char **g_argv; static char iniPath[MAX_PATH]; static FILETIME iniTime;
 static FILE *logfile; static char logPath[MAX_PATH]; static int logDay = -1;
 // One log per day: at the first message of a new day the current log becomes
@@ -87,6 +91,11 @@ static int scrW, scrH;               // output size
 static uint8_t *dens;                // pw*ph density map
 static uint32_t *pixels;             // scrW*scrH BGRA
 static uint32_t lut[256], lutHot[256];
+// The palette actually drawn eases toward the target, so a day/night switch
+// fades rather than jumping. Channels are R,G,B; the packed form is B<<16|G<<8|R.
+static double dispBg[3], dispCells[3], dispGain; static DWORD tgtBg, tgtCells; static double tgtGain;
+static void unpack3(DWORD c, double o[3]) { o[0] = c & 255; o[1] = (c >> 8) & 255; o[2] = (c >> 16) & 255; }
+static DWORD pack3(const double c[3]) { return ((DWORD)(c[2] + 0.5) << 16) | ((DWORD)(c[1] + 0.5) << 8) | (DWORD)(c[0] + 0.5); }
 static int dstX, dstY, dstW, dstH;   // where the view lands on screen (letterboxed)
 static int *mapX, *mapY, *fracX, *fracY; static uint8_t *hrows; // per source row, horizontally resampled to dstW
 
@@ -97,10 +106,12 @@ static uint32_t mix(DWORD a, DWORD b, double t) { // both BGR-packed; result BGR
 // Density -> colour. Presets set bg/cells unless overridden; cells2, if set,
 // makes a two-tone ramp (bg -> cells -> cells2 as density rises).
 static void build_palette(void) {
-  for (int i = 0; i < 256; i++) { double t = i * cfg.gain / 255.0; if (t > 1) t = 1;
-    lut[i] = cfg.hasCells2 ? (t < 0.5 ? mix(cfg.bg, cfg.cells, t * 2) : mix(cfg.cells, cfg.cells2, t * 2 - 1)) : mix(cfg.bg, cfg.cells, t);
-    lutHot[i] = mix(cfg.bg, cfg.hot, t); }
+  DWORD bg = pack3(dispBg), cells = pack3(dispCells);
+  for (int i = 0; i < 256; i++) { double t = i * dispGain / 255.0; if (t > 1) t = 1;
+    lut[i] = cfg.hasCells2 ? (t < 0.5 ? mix(bg, cells, t * 2) : mix(cells, cfg.cells2, t * 2 - 1)) : mix(bg, cells, t);
+    lutHot[i] = mix(bg, cfg.hot, t); }
 }
+static DWORD disp_cells(void) { return pack3(dispCells); }
 static int unitScale; // 1 when one map pixel is one screen pixel (no resample needed)
 static uint8_t *glow;  // afterglow buffer, same size as the density map
 static uint8_t *prevDens, *chg; // last frame's density and a decaying change map, for highlight
@@ -213,7 +224,7 @@ overlays:
     // PM: a filled dot to the left of the hour digits at their mid-height (pattern ~(1500, 5375)); AM: nothing.
     double sc = (double)dstW / view.pw;
     int cx = dstX + (int)(((1500 - view.x) >> view.z) * sc), cy = dstY + (int)(((5375 - view.y) >> view.z) * sc), rr = (int)(((240 >> view.z) * sc) / 2); if (rr < 4) rr = 4;
-    HBRUSH br = CreateSolidBrush(RGB(cfg.cells & 255, (cfg.cells >> 8) & 255, (cfg.cells >> 16) & 255)); HGDIOBJ ob = SelectObject(memdc, br), op = SelectObject(memdc, GetStockObject(NULL_PEN));
+    DWORD dc = disp_cells(); HBRUSH br = CreateSolidBrush(RGB(dc & 255, (dc >> 8) & 255, (dc >> 16) & 255)); HGDIOBJ ob = SelectObject(memdc, br), op = SelectObject(memdc, GetStockObject(NULL_PEN));
     GdiFlush(); Ellipse(memdc, cx - rr, cy - rr, cx + rr, cy + rr); SelectObject(memdc, ob); SelectObject(memdc, op); DeleteObject(br);
   }
   if (cfg.pmMode == 2 && memdc && pixels == (uint32_t *)dibBits) {
@@ -222,7 +233,7 @@ overlays:
     int cx = dstX + (int)((((760 + 1280) / 2 - view.x) >> view.z) * sc), cy = dstY + (int)((((4300 + 4600) / 2 - view.y) >> view.z) * sc);
     int fh = (int)(((4600 - 4300) >> view.z) * sc * 1.6); if (fh < 12) fh = 12;
     if (!pmFont || pmFontH != fh) { if (pmFont) DeleteObject(pmFont); pmFont = CreateFontA(-fh, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI"); pmFontH = fh; }
-    HGDIOBJ old = SelectObject(memdc, pmFont); SetBkMode(memdc, TRANSPARENT); SetTextColor(memdc, RGB(cfg.cells & 255, (cfg.cells >> 8) & 255, (cfg.cells >> 16) & 255)); SetTextAlign(memdc, TA_CENTER | TA_BASELINE);
+    HGDIOBJ old = SelectObject(memdc, pmFont); SetBkMode(memdc, TRANSPARENT); { DWORD dc = disp_cells(); SetTextColor(memdc, RGB(dc & 255, (dc >> 8) & 255, (dc >> 16) & 255)); } SetTextAlign(memdc, TA_CENTER | TA_BASELINE);
     GdiFlush(); TextOutA(memdc, cx, cy + fh / 3, pmLit ? "PM" : "AM", 2); SelectObject(memdc, old);
   }
 }
@@ -341,6 +352,7 @@ static void create_dib(int W, int H) {
 #define ID_LOG 4
 #define ID_QUIT 5
 #define ID_STARTUP 6
+#define ID_SETUP 7
 static NOTIFYICONDATAA nid; static HICON trayIcon;
 static HICON make_icon(void) { // a 32x32 amber disc with a dark colon, drawn at runtime
   HDC sdc = GetDC(NULL), mdc = CreateCompatibleDC(sdc); BITMAPINFO bi = { 0 }; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = 32; bi.bmiHeader.biHeight = -32; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
@@ -360,12 +372,8 @@ static int startup_installed(void) { char p[MAX_PATH]; startup_link_path(p, size
 static int startup_install(int on) {
   char p[MAX_PATH]; startup_link_path(p, sizeof p);
   if (!on) { int ok = DeleteFileA(p) || GetLastError() == ERROR_FILE_NOT_FOUND; logmsg("startup shortcut removed: %d", ok); return ok; }
-  CoInitialize(NULL); IShellLinkA *sl = NULL; IPersistFile *pf = NULL; int ok = 0;
-  if (SUCCEEDED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkA, (void **)&sl))) {
-    sl->lpVtbl->SetPath(sl, exePath); sl->lpVtbl->SetWorkingDirectory(sl, exeDir); sl->lpVtbl->SetDescription(sl, "Life Clock wallpaper");
-    if (SUCCEEDED(sl->lpVtbl->QueryInterface(sl, &IID_IPersistFile, (void **)&pf))) { wchar_t wp[MAX_PATH]; MultiByteToWideChar(CP_ACP, 0, p, -1, wp, MAX_PATH); ok = SUCCEEDED(pf->lpVtbl->Save(pf, wp, TRUE)); pf->lpVtbl->Release(pf); }
-    sl->lpVtbl->Release(sl); }
-  CoUninitialize(); logmsg("startup shortcut written: %d (%s)", ok, p); return ok;
+  int ok = lc_make_shortcut(exePath, NULL, exeDir, "Life Clock wallpaper", p);
+  logmsg("startup shortcut written: %d (%s)", ok, p); return ok;
 }
 static void tray_menu(HWND owner) {
   HMENU m = CreatePopupMenu();
@@ -375,6 +383,7 @@ static void tray_menu(HWND owner) {
   AppendMenuA(m, MF_STRING, ID_SETTINGS, "Settings...");
   AppendMenuA(m, MF_STRING, ID_LOG, "Open log");
   AppendMenuA(m, MF_STRING | (startup_installed() ? MF_CHECKED : 0), ID_STARTUP, "Start with Windows");
+  if (!lc_is_installed()) AppendMenuA(m, MF_STRING, ID_SETUP, "Install on this PC...");
   AppendMenuA(m, MF_SEPARATOR, 0, NULL);
   AppendMenuA(m, MF_STRING, ID_QUIT, "Quit");
   POINT pt; GetCursorPos(&pt); SetForegroundWindow(owner);
@@ -383,6 +392,7 @@ static void tray_menu(HWND owner) {
   else if (cmd == ID_WATCH) ShellExecuteA(NULL, "open", exePath, "--fullscreen 1", exeDir, SW_SHOWNORMAL);
   else if (cmd == ID_SETTINGS) ShellExecuteA(NULL, "open", exePath, "--settings", exeDir, SW_SHOWNORMAL);
   else if (cmd == ID_LOG) ShellExecuteA(NULL, "open", logPath, NULL, exeDir, SW_SHOWNORMAL);
+  else if (cmd == ID_SETUP) ShellExecuteA(NULL, "open", exePath, "--setup", exeDir, SW_SHOWNORMAL);
   else if (cmd == ID_STARTUP) startup_install(!startup_installed());
   else if (cmd == ID_QUIT) PostQuitMessage(0);
 }
@@ -451,6 +461,42 @@ static int desktop_covered(void) {
 // ---- settings: ini file + command line ---------------------------------------
 static const char *PRESETS[][3] = { { "amber", "07090f", "ffe9a8" }, { "green", "040a06", "5cff7a" }, { "white", "0a0a0a", "f2f2f2" }, { "blue", "070a14", "8cd2ff" }, { "red", "0c0605", "ff6b57" } };
 static DWORD parse_hex_bgr(const char *s) { unsigned v = (unsigned)strtoul(s[0] == '#' ? s + 1 : s, NULL, 16); return ((v & 0xff) << 16) | (v & 0xff00) | ((v >> 16) & 0xff); }
+// A palette name or an RRGGBB colour.
+static void preset_colors(const char *name, DWORD *bg, DWORD *cells) {
+  for (size_t i = 0; i < sizeof PRESETS / sizeof PRESETS[0]; i++) if (!strcmp(name, PRESETS[i][0])) { *bg = parse_hex_bgr(PRESETS[i][1]); *cells = parse_hex_bgr(PRESETS[i][2]); return; }
+  *cells = parse_hex_bgr(name);
+}
+// theme: 0 = the palette below, 1 = switch on the clock, 2 = follow the Windows light/dark app theme.
+static int is_day(void) {
+  if (cfg.theme == 2) { HKEY k; DWORD v = 1, n = sizeof v;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ, &k) == ERROR_SUCCESS) { RegQueryValueExA(k, "AppsUseLightTheme", NULL, NULL, (LPBYTE)&v, &n); RegCloseKey(k); }
+    return v != 0; }
+  SYSTEMTIME t; GetLocalTime(&t); int h = t.wHour;
+  if (cfg.dayStart <= cfg.nightStart) return h >= cfg.dayStart && h < cfg.nightStart;
+  return h >= cfg.dayStart || h < cfg.nightStart;
+}
+static void theme_targets(void) {
+  if (!cfg.theme) { tgtBg = cfg.bg; tgtCells = cfg.cells; tgtGain = cfg.gain; return; }
+  int day = is_day(); tgtBg = cfg.bg;
+  preset_colors(day ? cfg.dayPalette : cfg.nightPalette, &tgtBg, &tgtCells);
+  tgtGain = day ? cfg.dayGain : cfg.nightGain;
+}
+static void palette_snap(void) { unpack3(tgtBg, dispBg); unpack3(tgtCells, dispCells); dispGain = tgtGain; build_palette(); }
+static int ease_to(double *d, double t, double maxStep) {
+  double delta = t - *d; if (fabs(delta) < 1e-6) return 0;
+  if (fabs(delta) <= maxStep) *d = t; else *d += delta > 0 ? maxStep : -maxStep;
+  return 1;
+}
+// Moves the drawn palette toward the target; returns 1 if it moved.
+static int palette_ease(void) {
+  double tb[3], tc[3]; unpack3(tgtBg, tb); unpack3(tgtCells, tc);
+  double ms = (cfg.fadeSec > 0 && cfg.fps > 0) ? 255.0 / (cfg.fadeSec * cfg.fps) : 1e9;
+  int moved = 0;
+  for (int i = 0; i < 3; i++) { moved |= ease_to(&dispBg[i], tb[i], ms); moved |= ease_to(&dispCells[i], tc[i], ms); }
+  moved |= ease_to(&dispGain, tgtGain, ms * 0.5);
+  if (moved) build_palette();
+  return moved;
+}
 static void apply_setting(const char *key, const char *val) {
   if (!strcmp(key, "fps")) cfg.fps = atoi(val);
   else if (!strcmp(key, "battery_fps")) cfg.batteryFps = atoi(val);
@@ -469,6 +515,14 @@ static void apply_setting(const char *key, const char *val) {
   else if (!strcmp(key, "hot")) cfg.hot = parse_hex_bgr(val);
   else if (!strcmp(key, "frames")) cfg.frames = atoi(val);
   else if (!strcmp(key, "frame_step")) cfg.frameStep = atoi(val);
+  else if (!strcmp(key, "theme")) cfg.theme = !strcmp(val, "clock") ? 1 : !strcmp(val, "system") ? 2 : 0;
+  else if (!strcmp(key, "day_start")) cfg.dayStart = atoi(val);
+  else if (!strcmp(key, "night_start")) cfg.nightStart = atoi(val);
+  else if (!strcmp(key, "day_palette")) { strncpy(cfg.dayPalette, val, 15); cfg.dayPalette[15] = 0; }
+  else if (!strcmp(key, "night_palette")) { strncpy(cfg.nightPalette, val, 15); cfg.nightPalette[15] = 0; }
+  else if (!strcmp(key, "day_gain")) cfg.dayGain = atoi(val);
+  else if (!strcmp(key, "night_gain")) cfg.nightGain = atoi(val);
+  else if (!strcmp(key, "fade")) cfg.fadeSec = atof(val);
   else if (!strcmp(key, "zoom")) cfg.zoom = !strcmp(val, "auto") ? 0 : atoi(val);
   else if (!strcmp(key, "fullscreen")) cfg.fullscreen = atoi(val) || !strcmp(val, "true");
   else if (!strcmp(key, "colon")) cfg.colonMode = !strcmp(val, "machine") ? 0 : !strcmp(val, "hide") ? 2 : 1; // 1 = pulse (default)
@@ -481,6 +535,11 @@ static void clamp_settings(void) {
   if (cfg.fps != 3 && cfg.fps != 6 && cfg.fps != 12 && cfg.fps != 24) cfg.fps = 6;
   if (cfg.batteryFps != 1 && cfg.batteryFps != 3 && cfg.batteryFps != 6 && cfg.batteryFps != 12 && cfg.batteryFps != 24) cfg.batteryFps = 3;
   if (cfg.gain < 1) cfg.gain = 1; if (cfg.gain > 255) cfg.gain = 255;
+  if (cfg.dayStart < 0 || cfg.dayStart > 23) cfg.dayStart = 7;
+  if (cfg.nightStart < 0 || cfg.nightStart > 23) cfg.nightStart = 19;
+  if (cfg.dayGain < 1) cfg.dayGain = 1; if (cfg.dayGain > 255) cfg.dayGain = 255;
+  if (cfg.nightGain < 1) cfg.nightGain = 1; if (cfg.nightGain > 255) cfg.nightGain = 255;
+  if (cfg.fadeSec < 0) cfg.fadeSec = 0; if (cfg.fadeSec > 30) cfg.fadeSec = 30;
   if (cfg.afterglow < 0) cfg.afterglow = 0; if (cfg.afterglow > 0.95) cfg.afterglow = 0.95;
   if (cfg.zoom != 0 && cfg.zoom != 1 && cfg.zoom != 2 && cfg.zoom != 4 && cfg.zoom != 8 && cfg.zoom != 16) cfg.zoom = 0;
   if (cfg.size < 0.3) cfg.size = 0.3; if (cfg.size > 2.0) cfg.size = 2.0;
@@ -506,7 +565,19 @@ static const char *INI_TEMPLATE =
 "; Monitor index (0 = primary).\n"
 "monitor = 0\n"
 "\n"
-"; Colours. palette = amber | green | white | blue | red, or set bg / cells / cells2 yourself\n"
+"; Day/night: off = the single palette below; clock = switch at day_start / night_start;\n"
+"; system = follow the Windows light/dark app theme. day_palette and night_palette take a\n"
+"; preset name or an RRGGBB colour, and fade is how many seconds the change takes.\n"
+"theme = off\n"
+"day_start = 7\n"
+"night_start = 19\n"
+"day_palette = white\n"
+"night_palette = amber\n"
+"day_gain = 40\n"
+"night_gain = 22\n"
+"fade = 3\n"
+"\n"
+"; Colours (used when theme = off). palette = amber | green | white | blue | red, or set bg / cells / cells2 yourself\n"
 "; (RRGGBB). cells2, if set, is the colour of the densest areas (two-tone ramp); 'none' disables.\n"
 "palette = amber\n"
 "; bg = 07090f\n"
@@ -563,7 +634,7 @@ static int ini_changed(void) {
   WIN32_FILE_ATTRIBUTE_DATA a; if (!GetFileAttributesExA(iniPath, GetFileExInfoStandard, &a)) return 0;
   if (CompareFileTime(&a.ftLastWriteTime, &iniTime) == 0) return 0; iniTime = a.ftLastWriteTime; return 1;
 }
-static void load_settings(void) { cfg_defaults(); load_ini(); apply_args(); clamp_settings(); }
+static void load_settings(void) { cfg_defaults(); load_ini(); apply_args(); clamp_settings(); theme_targets(); }
 
 static void pick_monitor(int *mx, int *my, int *w, int *h) {
   RECT mons[8]; int nm = 0; BOOL CALLBACK monproc(HMONITOR, HDC, LPRECT, LPARAM);
@@ -585,6 +656,11 @@ int main(int argc, char **argv) {
     if ((a[0] == '/' || a[0] == '-') && (a[1] == 'c' || a[1] == 'C') && (a[2] == 0 || a[2] == ':')) scrCfg = 1;
     if ((a[0] == '/' || a[0] == '-') && (a[1] == 'p' || a[1] == 'P') && (a[2] == 0 || a[2] == ':')) scrPreview = 1; }
   if (scrPreview) return 0;
+  for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--setup") || !strcmp(argv[i], "--install") || !strcmp(argv[i], "--uninstall")) {
+    GetModuleFileNameA(NULL, exePath, MAX_PATH); strcpy(exeDir, exePath); char *sl = strrchr(exeDir, '\\'); if (sl) sl[1] = 0;
+    if (!strcmp(argv[i], "--setup")) return lc_setup_gui(exePath, exeDir);
+    if (!strcmp(argv[i], "--install")) return lc_install(exePath, 1, 0, 1) ? 0 : 1;
+    return lc_uninstall() ? 0 : 1; }
   for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--install-startup") || !strcmp(argv[i], "--uninstall-startup")) {
     GetModuleFileNameA(NULL, exePath, MAX_PATH); strcpy(exeDir, exePath); char *sl = strrchr(exeDir, '\\'); if (sl) sl[1] = 0;
     return startup_install(!strcmp(argv[i], "--install-startup")) ? 0 : 1; }
@@ -622,7 +698,7 @@ int main(int argc, char **argv) {
     typedef UINT (WINAPI *GDFS)(void); GDFS gdfs = (GDFS)GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForSystem");
     logmsg("dpi: awareness call ok=%d err=%lu, metrics %dx%d, display mode %lux%lu, system dpi %u", dpiok, dpierr, W, H, dm.dmPelsWidth, dm.dmPelsHeight, gdfs ? gdfs() : 0); }
 
-  QueryPerformanceFrequency(&qpf); hl_init(); build_palette();
+  QueryPerformanceFrequency(&qpf); hl_init(); theme_targets(); palette_snap();
   LARGE_INTEGER freq, t0, t1; QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&t0);
   if (!load_snapshot(current_minute())) return 3;
   setup_view(W, H);
@@ -680,7 +756,8 @@ int main(int argc, char **argv) {
       hostParent = NULL; attach_to_desktop(); present(); lastOccl = now; attachVerified = 0; attachTry = 0; visibleSince = 0; continue;
     }
     if (now - lastIni > 2000) { lastIni = now;
-      if (ini_changed()) { int oldColon = cfg.colonMode; load_settings(); build_palette(); setup_view(scrW, scrH); dibPainted = 0; if (cfg.colonMode != oldColon) load_snapshot(current_minute()); render(); present(); logmsg("settings reloaded: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain); }
+      if (ini_changed()) { int oldColon = cfg.colonMode; load_settings(); palette_snap(); setup_view(scrW, scrH); dibPainted = 0; if (cfg.colonMode != oldColon) load_snapshot(current_minute()); render(); present(); logmsg("settings reloaded: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain); }
+      theme_targets();
       SYSTEM_POWER_STATUS ps; GetSystemPowerStatus(&ps); onBattery = (ps.ACLineStatus == 0);
       int f = onBattery ? cfg.batteryFps : cfg.fps; stepGens = GPS / f; frameMs = 1000 / f; }
     if (now - lastOccl > 1000) { lastOccl = now;
@@ -708,6 +785,7 @@ int main(int argc, char **argv) {
     target = target_generation(); int64_t behind = target - uni.generation;
     if (behind < -PERIOD || behind > 30 * PERIOD) { logmsg("resync: behind %lld", (long long)behind); load_snapshot(current_minute()); continue; }
     if (cfg.fullscreen && cfg.tour > 0 && cfg.zoom) { double cx, cy; tour_center((now - tourStart) / 1000.0, &cx, &cy); set_center(cx, cy); n_force = 1; }
+    if (palette_ease()) n_force = 1;
     int n = 0; while (behind >= stepGens && n < 8) { hl_advance(&uni, stepGens); behind -= stepGens; n++; }
     if (behind >= stepGens) { hl_advance(&uni, behind - behind % stepGens); n++; } // long pause: one jump
     if (n || n_force) { render(); present(); frames++; n_force = 0; }

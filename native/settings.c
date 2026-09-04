@@ -73,6 +73,14 @@ static Ctl ctls[] = {
   { "afterglow",   "Afterglow (%)",           T_SLIDER, NULL, 0, 95, 116, 0, 0, "0" },
   { "tour",        "Tour (watch mode / screensaver)", T_COMBO, "auto|1|0", 0, 0, 117, 0, 0, "auto" },
   { "status",      "Show status line",        T_CHECK,  NULL, 0, 0, 118, 0, 0, "0" },
+  { "theme",       "Day / night",             T_COMBO,  "off|clock|system", 0, 0, 119, 0, 0, "off" },
+  { "day_palette", "Day palette",             T_COMBO,  "white|blue|green|amber|red", 0, 0, 120, 0, 0, "white" },
+  { "night_palette", "Night palette",         T_COMBO,  "amber|red|green|blue|white", 0, 0, 121, 0, 0, "amber" },
+  { "day_gain",    "Day brightness",          T_SLIDER, NULL, 5, 120, 122, 0, 0, "40" },
+  { "night_gain",  "Night brightness",        T_SLIDER, NULL, 5, 120, 123, 0, 0, "22" },
+  { "day_start",   "Day starts at (hour)",    T_SLIDER, NULL, 0, 23, 124, 0, 0, "7" },
+  { "night_start", "Night starts at (hour)",  T_SLIDER, NULL, 0, 23, 125, 0, 0, "19" },
+  { "fade",        "Fade between them (s)",   T_SLIDER, NULL, 0, 20, 126, 0, 0, "3" },
 };
 #define NCTL (int)(sizeof ctls / sizeof ctls[0])
 #define ID_STARTUP 200
@@ -95,6 +103,11 @@ static void load_into_controls(void) {
     else if (c->type == T_CHECK) SendMessageA(c->h, BM_SETCHECK, (atoi(v) || !strcmp(v, "true")) ? BST_CHECKED : BST_UNCHECKED, 0);
     else if (c->type == T_COLOR) SetWindowTextA(c->h, v);
   }
+  { char t[32]; ini_get("theme", t, sizeof t, "off"); int themed = strcmp(t, "off") != 0;
+    for (int i = 0; i < NCTL; i++) { const char *k = ctls[i].key;
+      int single = !strcmp(k, "palette") || !strcmp(k, "bg") || !strcmp(k, "cells") || !strcmp(k, "gain");
+      int dn = !strncmp(k, "day_", 4) || !strncmp(k, "night_", 6) || !strcmp(k, "fade");
+      if (single) EnableWindow(ctls[i].h, !themed); else if (dn) EnableWindow(ctls[i].h, themed); } }
   char base[MAX_PATH]; SHGetFolderPathA(NULL, CSIDL_STARTUP, NULL, 0, base); strcat(base, "\\Life Clock.lnk");
   SendMessageA(startupChk, BM_SETCHECK, GetFileAttributesA(base) != INVALID_FILE_ATTRIBUTES ? BST_CHECKED : BST_UNCHECKED, 0);
 }
@@ -105,7 +118,7 @@ static void save_control(Ctl *c) {
   else if (c->type == T_CHECK) strcpy(v, SendMessageA(c->h, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0");
   else { GetWindowTextA(c->h, v, sizeof v); }
   ini_set(c->key, v);
-  if (!strcmp(c->key, "palette")) { load_into_controls(); } // palette presets change bg/cells in the program, not the file; nothing to do
+  if (!strcmp(c->key, "palette") || !strcmp(c->key, "theme")) load_into_controls(); // palette presets change bg/cells in the program, not the file; nothing to do
 }
 static void pick_color(Ctl *c) {
   char cur[64]; GetWindowTextA(c->h, cur, sizeof cur);
@@ -144,16 +157,16 @@ int settings_main(const char *ini, const char *exe, const char *dir) {
   typedef UINT (WINAPI *GDFS)(void); GDFS gdfs = (GDFS)GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForSystem"); if (gdfs) dpi = gdfs();
   font = CreateFontA(-S(12), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
   WNDCLASSA wc = { 0 }; wc.lpfnWndProc = proc; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "LifeClockSettings"; wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.hIcon = LoadIconA(wc.hInstance, MAKEINTRESOURCEA(1)); RegisterClassA(&wc);
-  const int LW = S(200), CW = S(230), ROW = S(30), PAD = S(14), COLW = LW + CW + S(30);
-  int rows = (NCTL + 1) / 2, W = 2 * COLW + PAD, H = PAD + rows * ROW + S(78);
+  const int NCOL = 3, LW = S(178), CW = S(186), ROW = S(30), PAD = S(14), COLW = LW + CW + S(22);
+  int rows = (NCTL + NCOL - 1) / NCOL, W = NCOL * COLW + PAD, H = PAD + rows * ROW + S(78);
   RECT r = { 0, 0, W, H }; AdjustWindowRect(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
   HWND h = CreateWindowExA(0, wc.lpszClassName, "Life Clock settings", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
   for (int i = 0; i < NCTL; i++) { Ctl *c = &ctls[i]; int col = i / rows, row = i % rows; int x = PAD + col * COLW, y = PAD + row * ROW;
     mk(h, "STATIC", c->label, SS_LEFT, x, y + S(6), LW, S(20), 0);
     if (c->type == T_COMBO) { c->h = mk(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL, x + LW, y + S(2), CW, S(200), c->id); const char *o = c->opts; char tok[32]; while (*o) { const char *b = strchr(o, '|'); size_t l = b ? (size_t)(b - o) : strlen(o); memcpy(tok, o, l); tok[l] = 0; SendMessageA(c->h, CB_ADDSTRING, 0, (LPARAM)tok); o += l + (b ? 1 : 0); } }
-    else if (c->type == T_SLIDER) { c->h = mk(h, TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, x + LW, y, CW - S(40), S(26), c->id); SendMessageA(c->h, TBM_SETRANGE, TRUE, MAKELONG(c->lo, c->hi)); c->hv = mk(h, "STATIC", "", SS_RIGHT, x + LW + CW - S(38), y + S(6), S(36), S(20), 0); }
+    else if (c->type == T_SLIDER) { c->h = mk(h, TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, x + LW, y, CW - S(36), S(26), c->id); SendMessageA(c->h, TBM_SETRANGE, TRUE, MAKELONG(c->lo, c->hi)); c->hv = mk(h, "STATIC", "", SS_RIGHT, x + LW + CW - S(34), y + S(6), S(32), S(20), 0); }
     else if (c->type == T_CHECK) c->h = mk(h, "BUTTON", "", BS_AUTOCHECKBOX, x + LW, y + S(4), S(20), S(20), c->id);
-    else c->h = mk(h, "BUTTON", "", BS_PUSHBUTTON, x + LW, y + S(1), S(90), S(24), c->id);
+    else c->h = mk(h, "BUTTON", "", BS_PUSHBUTTON, x + LW, y + S(1), S(86), S(24), c->id);
   }
   int by = PAD + rows * ROW + S(14);
   startupChk = mk(h, "BUTTON", "Start with Windows", BS_AUTOCHECKBOX, PAD, by + S(4), S(170), S(22), ID_STARTUP);

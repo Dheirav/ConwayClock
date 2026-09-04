@@ -89,8 +89,9 @@ instead of minimising them, which the walk handles by stopping at Progman.
 Each frame: a density map of the view at 1/8 scale from the tile cache,
 a separable bilinear resample to the screen (each source row scaled once,
 then rows blended in a streaming pass), a palette lookup into the window's
-bitmap, and one GDI blit of the machine's rectangle. Optional passes on the
-density map: afterglow (a decaying maximum per pixel) and highlight (a
+bitmap, and one GDI blit of the machine's rectangle. The palette actually drawn eases toward
+the configured one, so a day/night switch fades over `fade` seconds instead
+of jumping. Optional passes on the density map: afterglow (a decaying maximum per pixel) and highlight (a
 decaying record of how much each pixel changed, selecting a second
 palette). The AM/PM dot and the colon replacement are the only additions
 to the picture; both are driven
@@ -122,8 +123,8 @@ From WSL with Zig, no admin, no Windows toolchain:
 ```bash
 Z=~/.local/opt/zig-x86_64-linux-0.14.1/zig
 cd native && $Z cc -target x86_64-windows-gnu -O2 -o life-clock.exe \
-  main.c hashlife.c inflate.c colon.c settings.c snapshots_data.c life-clock.rc \
-  -lgdi32 -luser32 -ldwmapi -lwtsapi32 -lshell32 -lole32 -luuid -lcomctl32 -lcomdlg32 -Wl,--subsystem,windows
+  main.c hashlife.c inflate.c colon.c settings.c install.c snapshots_data.c life-clock.rc \
+  -lgdi32 -luser32 -ldwmapi -lwtsapi32 -lshell32 -lole32 -luuid -lcomctl32 -lcomdlg32 -ladvapi32 -Wl,--subsystem,windows
 ```
 
 `snapshots_data.c` is generated from `snapshots/*.rle.gz` by
