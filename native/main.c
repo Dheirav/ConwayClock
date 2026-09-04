@@ -11,6 +11,7 @@
 // changes. Command-line flags with the same names override the file:
 //   life-clock.exe --fullscreen 1        watch mode: a normal window at 1/4 zoom, Esc closes
 //   life-clock.exe --install-startup | --uninstall-startup   add/remove the Startup-folder shortcut
+//   life-clock.exe --settings            the settings window (also from the tray menu)
 //   life-clock.exe [--fps N] [--battery_fps N] [--view whole|display] [--palette NAME]
 //                  [--bg RRGGBB] [--cells RRGGBB] [--cells2 RRGGBB] [--gain N]
 //                  [--size F] [--hpos F] [--vpos F] [--monitor N] [--status 0|1]
@@ -30,6 +31,7 @@
 #include "hashlife.h"
 #include "inflate.h"
 #include "colon.h"
+#include "settings.h"
 
 extern const int SNAP_COUNT; extern const int SNAP_MINUTE[]; extern const size_t SNAP_OFF[]; extern const unsigned char SNAP_DATA[];
 
@@ -40,7 +42,7 @@ extern const int SNAP_COUNT; extern const int SNAP_MINUTE[]; extern const size_t
 #define PAT_H 6796
 static const struct { int x, y, w, h; } DISPLAY = { 1900, 3950, 8000, 2850 };
 
-static struct { int fps, batteryFps, view, gain, status, attach, monitor, pmMode, colonMode, zoom, fullscreen, screensaver, tour, highlight, frames; double vpos, hpos, size, afterglow; DWORD hot; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; } cfg;
+static struct { int fps, batteryFps, view, gain, status, attach, monitor, pmMode, colonMode, zoom, fullscreen, screensaver, tour, highlight, frames, frameStep; double vpos, hpos, size, afterglow; DWORD hot; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; } cfg;
 static void cfg_defaults(void) { memset(&cfg, 0, sizeof cfg); cfg.pmMode = 3; cfg.colonMode = 1; cfg.tour = -1; cfg.hot = 0xffe9c8; /* BGR: light cyan-white */ cfg.fps = 6; cfg.batteryFps = 3; cfg.gain = 40; cfg.attach = 7; cfg.vpos = 0.5; cfg.hpos = 0.5; cfg.size = 1.0; cfg.bg = 0x0f0907; cfg.cells = 0xa8e9ff; strcpy(cfg.palette, "amber"); }
 static int g_argc; static char **g_argv; static char iniPath[MAX_PATH]; static FILETIME iniTime;
 static FILE *logfile; static char logPath[MAX_PATH]; static int logDay = -1;
@@ -370,7 +372,7 @@ static void tray_menu(HWND owner) {
   AppendMenuA(m, MF_STRING, ID_PAUSE, paused_manual ? "Resume" : "Pause");
   AppendMenuA(m, MF_STRING, ID_WATCH, "Watch full screen");
   AppendMenuA(m, MF_SEPARATOR, 0, NULL);
-  AppendMenuA(m, MF_STRING, ID_SETTINGS, "Open settings (life-clock.ini)");
+  AppendMenuA(m, MF_STRING, ID_SETTINGS, "Settings...");
   AppendMenuA(m, MF_STRING, ID_LOG, "Open log");
   AppendMenuA(m, MF_STRING | (startup_installed() ? MF_CHECKED : 0), ID_STARTUP, "Start with Windows");
   AppendMenuA(m, MF_SEPARATOR, 0, NULL);
@@ -379,7 +381,7 @@ static void tray_menu(HWND owner) {
   int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, 0, owner, NULL); DestroyMenu(m);
   if (cmd == ID_PAUSE) { paused_manual = !paused_manual; logmsg(paused_manual ? "paused from tray" : "resumed from tray"); }
   else if (cmd == ID_WATCH) ShellExecuteA(NULL, "open", exePath, "--fullscreen 1", exeDir, SW_SHOWNORMAL);
-  else if (cmd == ID_SETTINGS) ShellExecuteA(NULL, "open", iniPath, NULL, exeDir, SW_SHOWNORMAL);
+  else if (cmd == ID_SETTINGS) ShellExecuteA(NULL, "open", exePath, "--settings", exeDir, SW_SHOWNORMAL);
   else if (cmd == ID_LOG) ShellExecuteA(NULL, "open", logPath, NULL, exeDir, SW_SHOWNORMAL);
   else if (cmd == ID_STARTUP) startup_install(!startup_installed());
   else if (cmd == ID_QUIT) PostQuitMessage(0);
@@ -466,6 +468,7 @@ static void apply_setting(const char *key, const char *val) {
   else if (!strcmp(key, "highlight")) cfg.highlight = atoi(val) || !strcmp(val, "true");
   else if (!strcmp(key, "hot")) cfg.hot = parse_hex_bgr(val);
   else if (!strcmp(key, "frames")) cfg.frames = atoi(val);
+  else if (!strcmp(key, "frame_step")) cfg.frameStep = atoi(val);
   else if (!strcmp(key, "zoom")) cfg.zoom = !strcmp(val, "auto") ? 0 : atoi(val);
   else if (!strcmp(key, "fullscreen")) cfg.fullscreen = atoi(val) || !strcmp(val, "true");
   else if (!strcmp(key, "colon")) cfg.colonMode = !strcmp(val, "machine") ? 0 : !strcmp(val, "hide") ? 2 : 1; // 1 = pulse (default)
@@ -601,7 +604,8 @@ int main(int argc, char **argv) {
   logfile = fopen(logPath, "a");
   snprintf(iniPath, sizeof iniPath, "%slife-clock.ini", exe);
   load_settings(); cfg.frame = frameArg; ini_changed();
-  if (scrCfg) { ShellExecuteA(NULL, "open", iniPath, NULL, exeDir, SW_SHOWNORMAL); return 0; }
+  for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--settings")) scrCfg = 1;
+  if (scrCfg) return settings_main(iniPath, exePath, exeDir);
   if (scrRun) { cfg.fullscreen = 1; cfg.screensaver = 1; }
   logmsg("start: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d frame %s", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain, cfg.frame ? cfg.frame : "-");
 
@@ -634,7 +638,7 @@ int main(int argc, char **argv) {
     render(); if (cfg.afterglow > 0 || cfg.highlight) for (int i = 0; i < 8; i++) { hl_advance(&uni, 32); render(); } GdiFlush();
     if (cfg.frames > 1) { tourStart = 0; for (int i = 0; i < cfg.frames; i++) { char fn[MAX_PATH]; snprintf(fn, sizeof fn, "%s_%03d.bmp", cfg.frame, i);
         if (cfg.tour > 0 && cfg.zoom) { double cx, cy; tour_center(i / 6.0, &cx, &cy); set_center(cx, cy); }
-        hl_advance(&uni, 32); render(); GdiFlush(); write_bmp(fn); } }
+        hl_advance(&uni, cfg.frameStep > 0 ? cfg.frameStep : 32); render(); GdiFlush(); write_bmp(fn); } }
     else write_bmp(cfg.frame); HlStats s = hl_stats(); logmsg("frame written: %s; nodes %d memo %u tables %.0f MB", cfg.frame, s.nodes, s.memo, s.bytes / 1e6); return 0;
   }
 

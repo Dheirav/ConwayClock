@@ -30,8 +30,8 @@ jobs:
       - name: Build Windows executable
         run: |
           cd native && zig cc -target x86_64-windows-gnu -O2 -o life-clock.exe \
-            main.c hashlife.c inflate.c colon.c snapshots_data.c life-clock.rc \
-            -lgdi32 -luser32 -ldwmapi -lwtsapi32 -lshell32 -lole32 -luuid -Wl,--subsystem,windows
+            main.c hashlife.c inflate.c colon.c settings.c snapshots_data.c life-clock.rc \
+            -lgdi32 -luser32 -ldwmapi -lwtsapi32 -lshell32 -lole32 -luuid -lcomctl32 -lcomdlg32 -Wl,--subsystem,windows
           cp life-clock.exe life-clock.scr
           ls -la life-clock.exe
 

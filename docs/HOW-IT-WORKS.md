@@ -122,8 +122,8 @@ From WSL with Zig, no admin, no Windows toolchain:
 ```bash
 Z=~/.local/opt/zig-x86_64-linux-0.14.1/zig
 cd native && $Z cc -target x86_64-windows-gnu -O2 -o life-clock.exe \
-  main.c hashlife.c inflate.c colon.c snapshots_data.c life-clock.rc \
-  -lgdi32 -luser32 -ldwmapi -lwtsapi32 -lshell32 -lole32 -luuid -Wl,--subsystem,windows
+  main.c hashlife.c inflate.c colon.c settings.c snapshots_data.c life-clock.rc \
+  -lgdi32 -luser32 -ldwmapi -lwtsapi32 -lshell32 -lole32 -luuid -lcomctl32 -lcomdlg32 -Wl,--subsystem,windows
 ```
 
 `snapshots_data.c` is generated from `snapshots/*.rle.gz` by

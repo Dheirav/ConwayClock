@@ -35,13 +35,13 @@ choose Install, or put it in `C:\Windows\System32` and pick it in
 Settings, Personalisation, Lock screen, Screen saver settings. It runs the
 watch view at 1/4 zoom, touring the machine, and exits on mouse movement
 or a key. "Settings"
-in that dialog opens `life-clock.ini`.
+in that dialog opens the settings window.
 
 ## Tray icon
 
 While running, an amber clock icon sits in the notification area (it may be
 in the overflow behind the ^ arrow). Right-click it for: Pause / Resume,
-Watch full screen, Open settings, Open log, Start with Windows, Quit.
+Watch full screen, Settings, Open log, Start with Windows, Quit.
 
 ## Watch mode
 
@@ -68,12 +68,20 @@ life-clock.exe --install-startup
 Either writes a shortcut into your Startup folder; `--uninstall-startup` or
 unticking removes it.
 
-## Settings: `life-clock.ini`
+## Settings
 
-Created with comments on first run (a copy is in
-`native/life-clock.sample.ini`). Edit and save; the wallpaper picks up the
-change within two seconds without a restart. Every key can also be given
-on the command line as `--key value`, which overrides the file.
+Right-click the tray icon and choose Settings, or run
+`life-clock.exe --settings`. A window with a control for every setting:
+palette and colour pickers, sliders for brightness, size and position,
+drop-downs for frame rate, view, zoom, AM/PM, colon and tour, checkboxes
+for highlight, status line and start with Windows. Every change is written
+to `life-clock.ini` at once and the running wallpaper picks it up within
+two seconds. Shift-click a colour button to set it to `none`.
+
+The file itself is plain text with comments (a copy is in
+`native/life-clock.sample.ini`) and can be edited directly; the wallpaper
+reloads it the same way. Every key can also be given on the command line
+as `--key value`, which overrides the file.
 
 | Key | Default | Meaning |
 |---|---|---|
