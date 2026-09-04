@@ -27,6 +27,26 @@ life-clock.exe --quit
 
 Only one instance runs at a time; starting a second one exits immediately.
 
+## Tray icon
+
+While running, an amber clock icon sits in the notification area (it may be
+in the overflow behind the ^ arrow). Right-click it for: Pause / Resume,
+Watch full screen, Open settings, Open log, Quit.
+
+## Watch mode
+
+To actually watch the machine, gliders and all:
+
+```
+life-clock.exe --fullscreen 1
+```
+
+or "Watch full screen" from the tray menu. It opens a normal window covering
+the screen at 1/4 zoom, centred on the digits, synced like the wallpaper.
+Esc, Q or a click closes it; + and - (or up/down) zoom between 1/16 and
+1/1; the arrow keys and Page Up/Down pan. It runs alongside the wallpaper,
+which pauses while the window covers the desktop.
+
 ## Start at login
 
 Win+R, type `shell:startup`, Enter, and put a shortcut to `life-clock.exe`
@@ -54,6 +74,7 @@ on the command line as `--key value`, which overrides the file.
 | `gain` | 40 | Brightness of a single live cell in a zoomed-out pixel, 5 to 120 |
 | `pm` | dot | AM/PM. The machine has a box that is an outline in the morning and filled in the afternoon, next to a static "PM" label. `dot`: blank both, draw a filled dot beside the digits when the box says PM. `text`: keep the box, write AM or PM beside it. `machine`: show the corner as drawn. `hide`: blank it |
 | `colon` | pulse | The pattern's colon is two discs of still-life blocks. `pulse`: replace them with discs of pulsars so the dots breathe under Life's rules. `machine`: keep the blocks. `hide`: remove them |
+| `zoom` | auto | `auto` fits the view to the screen (1/8 for the whole machine). `8`, `4`, `2` or `1` fix the cells per pixel, centred on the digits with `hpos`/`vpos`; 4 shows individual gliders. Watch mode defaults to 4 |
 | `status` | 0 | Small line in the corner with generation, target and engine statistics |
 | `attach` | 7 | How the window is attached to the desktop; see troubleshooting |
 

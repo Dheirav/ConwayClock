@@ -23,7 +23,8 @@ a new generation lands.
 2. Double-click `life-clock.exe`. It syncs to the current time in a second
    or two and appears behind your desktop icons.
 3. Edit `life-clock.ini` next to it to change colours, size, position or
-   frame rate; it reloads live. `life-clock.exe --quit` stops it.
+   frame rate; it reloads live. The tray icon has Pause, Watch full screen
+   (a window at 1/4 zoom where you can see the gliders) and Quit.
 
 Cost with the desktop visible: about 4 % of one core at the default 6 fps,
 97 MB of memory, no GPU. Nothing while a window covers the desktop.
