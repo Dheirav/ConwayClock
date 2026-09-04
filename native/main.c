@@ -40,8 +40,8 @@ extern const int SNAP_COUNT; extern const int SNAP_MINUTE[]; extern const size_t
 #define PAT_H 6796
 static const struct { int x, y, w, h; } DISPLAY = { 1900, 3950, 8000, 2850 };
 
-static struct { int fps, batteryFps, view, gain, status, attach, monitor, pmMode, colonMode, zoom, fullscreen, screensaver; double vpos, hpos, size, afterglow; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; } cfg;
-static void cfg_defaults(void) { memset(&cfg, 0, sizeof cfg); cfg.pmMode = 3; cfg.colonMode = 1; cfg.fps = 6; cfg.batteryFps = 3; cfg.gain = 40; cfg.attach = 7; cfg.vpos = 0.5; cfg.hpos = 0.5; cfg.size = 1.0; cfg.bg = 0x0f0907; cfg.cells = 0xa8e9ff; strcpy(cfg.palette, "amber"); }
+static struct { int fps, batteryFps, view, gain, status, attach, monitor, pmMode, colonMode, zoom, fullscreen, screensaver, tour, highlight, frames; double vpos, hpos, size, afterglow; DWORD hot; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; } cfg;
+static void cfg_defaults(void) { memset(&cfg, 0, sizeof cfg); cfg.pmMode = 3; cfg.colonMode = 1; cfg.tour = -1; cfg.hot = 0xffe9c8; /* BGR: light cyan-white */ cfg.fps = 6; cfg.batteryFps = 3; cfg.gain = 40; cfg.attach = 7; cfg.vpos = 0.5; cfg.hpos = 0.5; cfg.size = 1.0; cfg.bg = 0x0f0907; cfg.cells = 0xa8e9ff; strcpy(cfg.palette, "amber"); }
 static int g_argc; static char **g_argv; static char iniPath[MAX_PATH]; static FILETIME iniTime;
 static FILE *logfile; static char logPath[MAX_PATH]; static int logDay = -1;
 // One log per day: at the first message of a new day the current log becomes
@@ -84,7 +84,7 @@ static void *dibBits; static int dibPainted; static HDC memdc;   // the screen D
 static int scrW, scrH;               // output size
 static uint8_t *dens;                // pw*ph density map
 static uint32_t *pixels;             // scrW*scrH BGRA
-static uint32_t lut[256];
+static uint32_t lut[256], lutHot[256];
 static int dstX, dstY, dstW, dstH;   // where the view lands on screen (letterboxed)
 static int *mapX, *mapY, *fracX, *fracY; static uint8_t *hrows; // per source row, horizontally resampled to dstW
 
@@ -96,10 +96,12 @@ static uint32_t mix(DWORD a, DWORD b, double t) { // both BGR-packed; result BGR
 // makes a two-tone ramp (bg -> cells -> cells2 as density rises).
 static void build_palette(void) {
   for (int i = 0; i < 256; i++) { double t = i * cfg.gain / 255.0; if (t > 1) t = 1;
-    lut[i] = cfg.hasCells2 ? (t < 0.5 ? mix(cfg.bg, cfg.cells, t * 2) : mix(cfg.cells, cfg.cells2, t * 2 - 1)) : mix(cfg.bg, cfg.cells, t); }
+    lut[i] = cfg.hasCells2 ? (t < 0.5 ? mix(cfg.bg, cfg.cells, t * 2) : mix(cfg.cells, cfg.cells2, t * 2 - 1)) : mix(cfg.bg, cfg.cells, t);
+    lutHot[i] = mix(cfg.bg, cfg.hot, t); }
 }
 static int unitScale; // 1 when one map pixel is one screen pixel (no resample needed)
 static uint8_t *glow;  // afterglow buffer, same size as the density map
+static uint8_t *prevDens, *chg; // last frame's density and a decaying change map, for highlight
 static void setup_view(int W, int H) {
   scrW = W; scrH = H;
   int rx, ry, rw, rh;
@@ -108,7 +110,7 @@ static void setup_view(int W, int H) {
     double dcx = DISPLAY.x + DISPLAY.w / 2.0, dcy = DISPLAY.y + DISPLAY.h / 2.0;
     view.z = z; view.pw = (int)ceil(W / cfg.size); view.ph = (int)ceil(H / cfg.size);
     view.w = view.pw << z; view.h = view.ph << z; view.x = (int)(dcx - cfg.hpos * view.w); view.y = (int)(dcy - cfg.vpos * view.h);
-    free(dens); dens = calloc((size_t)view.pw * view.ph, 1); free(glow); glow = calloc((size_t)view.pw * view.ph, 1);
+    free(dens); dens = calloc((size_t)view.pw * view.ph, 1); free(glow); glow = calloc((size_t)view.pw * view.ph, 1); free(prevDens); prevDens = calloc((size_t)view.pw * view.ph, 1); free(chg); chg = calloc((size_t)view.pw * view.ph, 1);
     if (!dibBits || pixels != (uint32_t *)dibBits) { free(pixels); pixels = calloc((size_t)W * H, 4); } else { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; } dibPainted = 0;
     dstW = (int)(view.pw * cfg.size); dstH = (int)(view.ph * cfg.size); dstX = 0; dstY = 0; unitScale = (cfg.size == 1.0);
     free(mapX); free(mapY); free(fracX); free(fracY); free(hrows);
@@ -129,7 +131,7 @@ static void setup_view(int W, int H) {
   double dcx = DISPLAY.x + DISPLAY.w / 2.0; double halfW = fmax(dcx - rx, rx + rw - dcx); rx = (int)(dcx - halfW); rw = (int)(2 * halfW);
   if (cfg.view == 0) { double dcy = DISPLAY.y + DISPLAY.h / 2.0; int top = (int)(dcy - cfg.vpos * rh); if (top < ry) top = ry; ry = top; }
   view.x = rx; view.y = ry; view.w = rw; view.h = rh; view.z = z; view.pw = (rw + (1 << z) - 1) >> z; view.ph = (rh + (1 << z) - 1) >> z;
-  free(dens); dens = calloc((size_t)view.pw * view.ph, 1); free(glow); glow = calloc((size_t)view.pw * view.ph, 1);
+  free(dens); dens = calloc((size_t)view.pw * view.ph, 1); free(glow); glow = calloc((size_t)view.pw * view.ph, 1); free(prevDens); prevDens = calloc((size_t)view.pw * view.ph, 1); free(chg); chg = calloc((size_t)view.pw * view.ph, 1);
   if (!dibBits || pixels != (uint32_t *)dibBits) { free(pixels); pixels = calloc((size_t)W * H, 4); } else { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; } dibPainted = 0;
   double scale = fmin((double)W / view.pw, (double)H / view.ph) * cfg.size;
   dstW = (int)(view.pw * scale); dstH = (int)(view.ph * scale);
@@ -142,6 +144,24 @@ static void setup_view(int W, int H) {
   logmsg("view: %dx%d cells at 1/%d -> %dx%d map -> %dx%d at (%d,%d) on %dx%d", rw, rh, 1 << z, view.pw, view.ph, dstW, dstH, dstX, dstY, W, H);
 }
 // Density map -> bilinear resample -> palette -> pixels.
+// Tour waypoints (pattern coordinates): where the machine's parts are.
+static const struct { int x, y; const char *what; } TOUR[] = {
+  { 5900, 5375, "display" }, { 8960, 5375, "minute digits" }, { 5250, 5440, "colon" }, { 2600, 5375, "hour digits and AM/PM" },
+  { 8900, 3050, "lookup table 3" }, { 6600, 3050, "lookup table 2" }, { 3700, 3050, "lookup table 1" },
+  { 5300, 1700, "clock distribution" }, { 5500, 450, "timebase" }, { 5900, 3300, "counters" } };
+#define TOUR_N (int)(sizeof TOUR / sizeof TOUR[0])
+static const double TOUR_DWELL = 7.0, TOUR_SPEED = 220.0; // seconds at each stop; cells per second while moving
+static double tourStart;
+// Centre of the view at tour time t (seconds), eased between stops.
+static void tour_center(double t, double *cx, double *cy) {
+  double total = 0, segs[TOUR_N]; for (int i = 0; i < TOUR_N; i++) { int j = (i + 1) % TOUR_N; segs[i] = hypot(TOUR[j].x - TOUR[i].x, TOUR[j].y - TOUR[i].y) / TOUR_SPEED; total += TOUR_DWELL + segs[i]; }
+  t = fmod(t, total);
+  for (int i = 0; i < TOUR_N; i++) { int j = (i + 1) % TOUR_N;
+    if (t < TOUR_DWELL) { *cx = TOUR[i].x; *cy = TOUR[i].y; return; } t -= TOUR_DWELL;
+    if (t < segs[i]) { double u = t / segs[i]; u = u * u * (3 - 2 * u); *cx = TOUR[i].x + (TOUR[j].x - TOUR[i].x) * u; *cy = TOUR[i].y + (TOUR[j].y - TOUR[i].y) * u; return; } t -= segs[i]; }
+  *cx = TOUR[0].x; *cy = TOUR[0].y;
+}
+static void set_center(double cx, double cy) { view.x = (int)(cx - view.w / 2.0); view.y = (int)(cy - view.h / 2.0); }
 static double tRender, tResample, tPresent; static LARGE_INTEGER qpf; static int pmLit; static HFONT pmFont; static int pmFontH;
 static double qnow(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return (double)t.QuadPart * 1000.0 / qpf.QuadPart; }
 static void render(void) {
@@ -159,6 +179,10 @@ static void render(void) {
     if (lx0 < 0) lx0 = 0; if (ly0 < 0) ly0 = 0; if (lx1 > view.pw) lx1 = view.pw; if (ly1 > view.ph) ly1 = view.ph;
     for (int y = ly0; y < ly1; y++) memset(dens + (size_t)y * view.pw + lx0, 0, lx1 > lx0 ? lx1 - lx0 : 0);
   }
+  if (cfg.highlight) { // change map: how much each map pixel differed from the last frame, decaying
+    size_t n = (size_t)view.pw * view.ph;
+    for (size_t i = 0; i < n; i++) { int d = dens[i] - prevDens[i]; if (d < 0) d = -d; d *= 24; if (d > 255) d = 255; int c = (chg[i] * 200) >> 8; chg[i] = (uint8_t)(d > c ? d : c); }
+    memcpy(prevDens, dens, n); }
   if (cfg.afterglow > 0) { // trails: each map pixel keeps a decaying maximum of what has been there
     int k = (int)(cfg.afterglow * 256); size_t n = (size_t)view.pw * view.ph;
     for (size_t i = 0; i < n; i++) { int v = dens[i], g = glow[i]; if (v > g) g = v; dens[i] = (uint8_t)g; glow[i] = (uint8_t)((g * k) >> 8); } }
@@ -166,7 +190,8 @@ static void render(void) {
   const int pw = view.pw, ph = view.ph, dw = dstW;
   if (unitScale) { // one map pixel per screen pixel: palette lookup only
     int cw = pw < scrW ? pw : scrW, chh = ph < scrH ? ph : scrH;
-    for (int y = 0; y < chh; y++) { const uint8_t *r = dens + (size_t)y * pw; uint32_t *out = pixels + (size_t)y * scrW; for (int x = 0; x < cw; x++) out[x] = lut[r[x]]; }
+    for (int y = 0; y < chh; y++) { const uint8_t *r = dens + (size_t)y * pw, *c = chg + (size_t)y * pw; uint32_t *out = pixels + (size_t)y * scrW;
+      if (cfg.highlight) for (int x = 0; x < cw; x++) out[x] = (c[x] > 30 ? lutHot : lut)[r[x]]; else for (int x = 0; x < cw; x++) out[x] = lut[r[x]]; }
     tResample += qnow() - b; goto overlays;
   }
   // Pass 1: each source row resampled horizontally once (gather).
@@ -177,7 +202,8 @@ static void render(void) {
   for (int y = y0; y < y1; y++) {
     const uint8_t *a0 = hrows + (size_t)mapY[y] * dw, *a1 = a0 + dw; int fy = fracY[y], gy = 256 - fy;
     uint32_t *out = pixels + (size_t)(dstY + y) * scrW + dstX;
-    for (int x = x0; x < x1; x++) out[x] = lut[(a0[x] * gy + a1[x] * fy) >> 8];
+    if (cfg.highlight) { const uint8_t *c = chg + (size_t)mapY[y] * pw; for (int x = x0; x < x1; x++) out[x] = (c[mapX[x]] > 30 ? lutHot : lut)[(a0[x] * gy + a1[x] * fy) >> 8]; }
+    else for (int x = x0; x < x1; x++) out[x] = lut[(a0[x] * gy + a1[x] * fy) >> 8];
   }
   tResample += qnow() - b;
 overlays:
@@ -377,6 +403,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_MOUSEMOVE: if (cfg.screensaver) { static POINT first = { -1, -1 }; POINT pt; GetCursorPos(&pt); if (first.x < 0) first = pt; else if (abs(pt.x - first.x) > 12 || abs(pt.y - first.y) > 12) PostQuitMessage(0); } return 0;
     case WM_KEYDOWN: if (cfg.screensaver) { PostQuitMessage(0); return 0; } if (!cfg.fullscreen) return 0;
       if (w == VK_ESCAPE || w == 'Q') PostQuitMessage(0);
+      else if (w == 'T') { cfg.tour = cfg.tour > 0 ? 0 : 1; tourStart = GetTickCount(); }
       else if (w == VK_ADD || w == VK_OEM_PLUS || w == VK_UP) { if (cfg.zoom > 1) { cfg.zoom /= 2; setup_view(scrW, scrH); } }
       else if (w == VK_SUBTRACT || w == VK_OEM_MINUS || w == VK_DOWN) { if (cfg.zoom < 16) { cfg.zoom *= 2; setup_view(scrW, scrH); } }
       else if (w == VK_LEFT) { cfg.hpos += 0.1; setup_view(scrW, scrH); } else if (w == VK_RIGHT) { cfg.hpos -= 0.1; setup_view(scrW, scrH); }
@@ -435,6 +462,10 @@ static void apply_setting(const char *key, const char *val) {
   else if (!strcmp(key, "attach")) cfg.attach = atoi(val);
   else if (!strcmp(key, "pm")) cfg.pmMode = !strcmp(val, "hide") ? 1 : !strcmp(val, "machine") ? 0 : !strcmp(val, "text") ? 2 : 3; // 3 = dot (default)
   else if (!strcmp(key, "afterglow")) cfg.afterglow = atof(val);
+  else if (!strcmp(key, "tour")) cfg.tour = !strcmp(val, "auto") ? -1 : (atoi(val) || !strcmp(val, "true"));
+  else if (!strcmp(key, "highlight")) cfg.highlight = atoi(val) || !strcmp(val, "true");
+  else if (!strcmp(key, "hot")) cfg.hot = parse_hex_bgr(val);
+  else if (!strcmp(key, "frames")) cfg.frames = atoi(val);
   else if (!strcmp(key, "zoom")) cfg.zoom = !strcmp(val, "auto") ? 0 : atoi(val);
   else if (!strcmp(key, "fullscreen")) cfg.fullscreen = atoi(val) || !strcmp(val, "true");
   else if (!strcmp(key, "colon")) cfg.colonMode = !strcmp(val, "machine") ? 0 : !strcmp(val, "hide") ? 2 : 1; // 1 = pulse (default)
@@ -488,6 +519,15 @@ static const char *INI_TEMPLATE =
 "; The colon: pulse = the pattern's still-life discs replaced by discs of pulsars (period-3\n"
 "; oscillators) so the dots breathe under Life's rules (default); machine = as drawn; hide.\n"
 "colon = pulse\n"
+"\n"
+"; Highlight: 1 = colour cells that changed since the last frame in 'hot' (default c8e9ff), so the\n"
+"; working parts of the machine stand out from the static hardware; 0 = off.\n"
+"highlight = 0\n"
+"; hot = c8e9ff\n"
+"\n"
+"; Tour: in watch mode and the screensaver, pan slowly around the machine (timebase, distribution,\n"
+"; lookup tables, digits). auto = on for the screensaver, off for watch mode; 1 = on; 0 = off.\n"
+"tour = auto\n"
 "\n"
 "; Afterglow: 0 = off; 0.5-0.9 leaves fading trails behind moving cells (one cheap pass per frame).\n"
 "afterglow = 0\n"
@@ -591,7 +631,11 @@ int main(int argc, char **argv) {
     { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; }
     int64_t target = target_generation(); while (target - uni.generation >= GPS) { int64_t step = target - uni.generation; if (step > PERIOD) step = PERIOD; hl_advance(&uni, step); target = target_generation(); }
     QueryPerformanceCounter(&t1); logmsg("synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
-    render(); if (cfg.afterglow > 0) for (int i = 0; i < 8; i++) { hl_advance(&uni, 32); render(); } GdiFlush(); write_bmp(cfg.frame); HlStats s = hl_stats(); logmsg("frame written: %s; nodes %d memo %u tables %.0f MB", cfg.frame, s.nodes, s.memo, s.bytes / 1e6); return 0;
+    render(); if (cfg.afterglow > 0 || cfg.highlight) for (int i = 0; i < 8; i++) { hl_advance(&uni, 32); render(); } GdiFlush();
+    if (cfg.frames > 1) { tourStart = 0; for (int i = 0; i < cfg.frames; i++) { char fn[MAX_PATH]; snprintf(fn, sizeof fn, "%s_%03d.bmp", cfg.frame, i);
+        if (cfg.tour > 0 && cfg.zoom) { double cx, cy; tour_center(i / 6.0, &cx, &cy); set_center(cx, cy); }
+        hl_advance(&uni, 32); render(); GdiFlush(); write_bmp(fn); } }
+    else write_bmp(cfg.frame); HlStats s = hl_stats(); logmsg("frame written: %s; nodes %d memo %u tables %.0f MB", cfg.frame, s.nodes, s.memo, s.bytes / 1e6); return 0;
   }
 
   WNDCLASSA wc = { 0 }; wc.lpfnWndProc = wndproc; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "LifeClockWallpaper"; wc.hbrBackground = NULL; wc.hIcon = LoadIconA(wc.hInstance, MAKEINTRESOURCEA(1)); RegisterClassA(&wc);
@@ -616,7 +660,8 @@ int main(int argc, char **argv) {
   QueryPerformanceCounter(&t1); logmsg("synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
 
   int stepGens = GPS / cfg.fps; DWORD frameMs = 1000 / cfg.fps; int paused = 0; DWORD lastOccl = 0; int frames = 0; double workMs = 0; DWORD lastReport = GetTickCount(); int onBattery = 0; DWORD lastIni = 0;
-  int attachVerified = cfg.fullscreen, attachTry = 0; DWORD visibleSince = 0, recheckAt = 0;
+  int attachVerified = cfg.fullscreen, attachTry = 0; DWORD visibleSince = 0, recheckAt = 0; int n_force = 0; tourStart = GetTickCount();
+  if (cfg.tour < 0) cfg.tour = cfg.screensaver;   // auto: tour in the screensaver, static in watch mode
   for (;;) {
     DWORD r = MsgWaitForMultipleObjects(1, &quitEv, FALSE, paused ? 1000 : frameMs, QS_ALLINPUT);
     if (r == WAIT_OBJECT_0) break;
@@ -658,9 +703,10 @@ int main(int argc, char **argv) {
     LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
     target = target_generation(); int64_t behind = target - uni.generation;
     if (behind < -PERIOD || behind > 30 * PERIOD) { logmsg("resync: behind %lld", (long long)behind); load_snapshot(current_minute()); continue; }
+    if (cfg.fullscreen && cfg.tour > 0 && cfg.zoom) { double cx, cy; tour_center((now - tourStart) / 1000.0, &cx, &cy); set_center(cx, cy); n_force = 1; }
     int n = 0; while (behind >= stepGens && n < 8) { hl_advance(&uni, stepGens); behind -= stepGens; n++; }
     if (behind >= stepGens) { hl_advance(&uni, behind - behind % stepGens); n++; } // long pause: one jump
-    if (n) { render(); present(); frames++; }
+    if (n || n_force) { render(); present(); frames++; n_force = 0; }
     HlStats s = hl_stats(); if (s.nodes > 3000000) { HlGcResult g = hl_gc(&uni); logmsg("gc: %d -> %d nodes", g.before, g.after); }
     QueryPerformanceCounter(&b); workMs += (double)(b.QuadPart - a.QuadPart) * 1000.0 / freq.QuadPart;
     if (now - lastReport > 60000) { logmsg("last minute: %d frames, work %.0f ms = %.2f%% of one core [render %.1f, resample %.1f, present %.1f ms/frame], nodes %d, memo %u, tables %.0f MB", frames, workMs, workMs / 600.0, frames ? tRender / frames : 0, frames ? tResample / frames : 0, frames ? tPresent / frames : 0, s.nodes, s.memo, s.bytes / 1e6); frames = 0; workMs = 0; tRender = tResample = tPresent = 0; lastReport = now; }

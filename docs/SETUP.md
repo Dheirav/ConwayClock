@@ -33,7 +33,8 @@ The same program is a Windows screensaver. Copy `life-clock.exe` to
 `life-clock.scr` (the release has it ready), right-click the `.scr` and
 choose Install, or put it in `C:\Windows\System32` and pick it in
 Settings, Personalisation, Lock screen, Screen saver settings. It runs the
-watch view at 1/4 zoom and exits on mouse movement or a key. "Settings"
+watch view at 1/4 zoom, touring the machine, and exits on mouse movement
+or a key. "Settings"
 in that dialog opens `life-clock.ini`.
 
 ## Tray icon
@@ -53,7 +54,7 @@ life-clock.exe --fullscreen 1
 or "Watch full screen" from the tray menu. It opens a normal window covering
 the screen at 1/4 zoom, centred on the digits, synced like the wallpaper.
 Esc, Q or a click closes it; + and - (or up/down) zoom between 1/16 and
-1/1; the arrow keys and Page Up/Down pan. It runs alongside the wallpaper,
+1/1; the arrow keys and Page Up/Down pan; T starts or stops the tour. It runs alongside the wallpaper,
 which pauses while the window covers the desktop.
 
 ## Start at login
@@ -89,6 +90,8 @@ on the command line as `--key value`, which overrides the file.
 | `gain` | 40 | Brightness of a single live cell in a zoomed-out pixel, 5 to 120 |
 | `pm` | dot | AM/PM. The machine has a box that is an outline in the morning and filled in the afternoon, next to a static "PM" label. `dot`: blank both, draw a filled dot beside the digits when the box says PM. `text`: keep the box, write AM or PM beside it. `machine`: show the corner as drawn. `hide`: blank it |
 | `colon` | pulse | The pattern's colon is two discs of still-life blocks. `pulse`: replace them with discs of pulsars so the dots breathe under Life's rules. `machine`: keep the blocks. `hide`: remove them |
+| `highlight` | 0 | 1 colours cells that changed since the last frame in the `hot` colour (default c8e9ff), so the working parts of the machine stand out from the static hardware |
+| `tour` | auto | In watch mode and the screensaver, pan slowly around the machine: display, digits, colon, lookup tables, clock distribution, timebase, counters. `auto` is on for the screensaver and off for watch mode; T toggles it in the window |
 | `afterglow` | 0 | 0 is off; 0.5 to 0.9 leaves fading trails behind moving cells, one cheap pass per frame. Most useful at zoom 4 or closer |
 | `zoom` | auto | `auto` fits the view to the screen (1/8 for the whole machine). `8`, `4`, `2` or `1` fix the cells per pixel, centred on the digits with `hpos`/`vpos`; 4 shows individual gliders. Watch mode defaults to 4 |
 | `status` | 0 | Small line in the corner with generation, target and engine statistics |

@@ -89,8 +89,11 @@ instead of minimising them, which the walk handles by stopping at Progman.
 Each frame: a density map of the view at 1/8 scale from the tile cache,
 a separable bilinear resample to the screen (each source row scaled once,
 then rows blended in a streaming pass), a palette lookup into the window's
-bitmap, and one GDI blit of the machine's rectangle. The AM/PM dot and the
-colon replacement are the only additions to the picture; both are driven
+bitmap, and one GDI blit of the machine's rectangle. Optional passes on the
+density map: afterglow (a decaying maximum per pixel) and highlight (a
+decaying record of how much each pixel changed, selecting a second
+palette). The AM/PM dot and the colon replacement are the only additions
+to the picture; both are driven
 by the machine's own state (the dot by the indicator box's cell count, the
 colon by swapping the still-life discs for pulsar discs at load, in a
 region nothing else ever enters).

@@ -5,6 +5,11 @@ behind your Windows desktop icons.
 
 ![The machine on the desktop: glider-gun timebase, lookup tables, and the 7-segment display reading the time](docs/screenshot.png)
 
+Up close, in the watch view at 1/4 zoom, the segments are bundles of gliders
+and the colon is two discs of pulsars:
+
+![Watch view: glider streams forming the digits, pulsar colon](docs/watch.gif)
+
 The pattern is dim's digital clock from the Code Golf Stack Exchange
 challenge "Build a digital clock in Conway's Game of Life" (2017): a real
 Life machine with a glider-gun timebase, counters, latches and lookup
@@ -24,7 +29,8 @@ a new generation lands.
    or two and appears behind your desktop icons.
 3. Edit `life-clock.ini` next to it to change colours, size, position or
    frame rate; it reloads live. The tray icon has Pause, Watch full screen
-   (a window at 1/4 zoom where you can see the gliders) and Quit.
+   (a window at 1/4 zoom where you can see the gliders), Start with Windows
+   and Quit. Renamed to `.scr` it is a screensaver that tours the machine.
 
 Cost with the desktop visible: about 4 % of one core at the default 6 fps,
 97 MB of memory, no GPU. Nothing while a window covers the desktop.
