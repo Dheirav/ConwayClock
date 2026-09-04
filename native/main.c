@@ -10,6 +10,7 @@
 // defaults and comments on first run) and are reloaded live when the file
 // changes. Command-line flags with the same names override the file:
 //   life-clock.exe --fullscreen 1        watch mode: a normal window at 1/4 zoom, Esc closes
+//   life-clock.exe --install-startup | --uninstall-startup   add/remove the Startup-folder shortcut
 //   life-clock.exe [--fps N] [--battery_fps N] [--view whole|display] [--palette NAME]
 //                  [--bg RRGGBB] [--cells RRGGBB] [--cells2 RRGGBB] [--gain N]
 //                  [--size F] [--hpos F] [--vpos F] [--monitor N] [--status 0|1]
@@ -24,6 +25,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <shlobj.h>
+#include <objbase.h>
 #include "hashlife.h"
 #include "inflate.h"
 #include "colon.h"
@@ -211,6 +214,9 @@ static int screen_shows_us(void) {
   double sc = (double)dstW / view.pw;
   int cx = dstX + (int)(((5900 - view.x) >> view.z) * sc), cy = dstY + (int)(((5375 - view.y) >> view.z) * sc), R = 48;
   int x0 = cx - R, y0 = cy - R; if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x0 + 2 * R > scrW) x0 = scrW - 2 * R; if (y0 + 2 * R > scrH) y0 = scrH - 2 * R;
+  { // Is the desktop what is on screen at the sample point? If some window covers it, the check means nothing.
+    HWND at = GetAncestor(WindowFromPoint((POINT){ g_monX + cx, g_monY + cy }), GA_ROOT); char cls[64] = ""; if (at) GetClassNameA(at, cls, sizeof cls);
+    if (strcmp(cls, "Progman") && strcmp(cls, "WorkerW")) { logmsg("screen check skipped: %s is at the sample point", cls[0] ? cls : "nothing"); return -1; } }
   HDC sdc = GetDC(NULL), mdc = CreateCompatibleDC(sdc); BITMAPINFO bi = { 0 }; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = 2 * R; bi.bmiHeader.biHeight = -2 * R; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
   uint32_t *cap; HBITMAP bm = CreateDIBSection(mdc, &bi, DIB_RGB_COLORS, (void **)&cap, NULL, 0); SelectObject(mdc, bm);
   BitBlt(mdc, 0, 0, 2 * R, 2 * R, sdc, g_monX + x0, g_monY + y0, SRCCOPY | CAPTUREBLT); GdiFlush();
@@ -306,6 +312,7 @@ static void create_dib(int W, int H) {
 #define ID_SETTINGS 3
 #define ID_LOG 4
 #define ID_QUIT 5
+#define ID_STARTUP 6
 static NOTIFYICONDATAA nid; static HICON trayIcon;
 static HICON make_icon(void) { // a 32x32 amber disc with a dark colon, drawn at runtime
   HDC sdc = GetDC(NULL), mdc = CreateCompatibleDC(sdc); BITMAPINFO bi = { 0 }; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = 32; bi.bmiHeader.biHeight = -32; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
@@ -315,11 +322,23 @@ static HICON make_icon(void) { // a 32x32 amber disc with a dark colon, drawn at
   HBITMAP mask = CreateBitmap(32, 32, 1, 1, NULL); ICONINFO ii = { TRUE, 0, 0, mask, color }; HICON h = CreateIconIndirect(&ii); DeleteObject(mask); DeleteObject(color); DeleteDC(mdc); return h;
 }
 static void tray_add(HWND owner) {
-  trayIcon = make_icon(); memset(&nid, 0, sizeof nid); nid.cbSize = sizeof nid; nid.hWnd = owner; nid.uID = 1; nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; nid.uCallbackMessage = WM_TRAY; nid.hIcon = trayIcon; strcpy(nid.szTip, "Life Clock");
+  trayIcon = LoadIconA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(1)); if (!trayIcon) trayIcon = make_icon(); memset(&nid, 0, sizeof nid); nid.cbSize = sizeof nid; nid.hWnd = owner; nid.uID = 1; nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; nid.uCallbackMessage = WM_TRAY; nid.hIcon = trayIcon; strcpy(nid.szTip, "Life Clock");
   Shell_NotifyIconA(NIM_ADD, &nid);
 }
 static void tray_remove(void) { Shell_NotifyIconA(NIM_DELETE, &nid); if (trayIcon) DestroyIcon(trayIcon); }
 static char exeDir[MAX_PATH], exePath[MAX_PATH];
+static void startup_link_path(char *out, size_t n) { char base[MAX_PATH]; SHGetFolderPathA(NULL, CSIDL_STARTUP, NULL, 0, base); snprintf(out, n, "%s\\Life Clock.lnk", base); }
+static int startup_installed(void) { char p[MAX_PATH]; startup_link_path(p, sizeof p); return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES; }
+static int startup_install(int on) {
+  char p[MAX_PATH]; startup_link_path(p, sizeof p);
+  if (!on) { int ok = DeleteFileA(p) || GetLastError() == ERROR_FILE_NOT_FOUND; logmsg("startup shortcut removed: %d", ok); return ok; }
+  CoInitialize(NULL); IShellLinkA *sl = NULL; IPersistFile *pf = NULL; int ok = 0;
+  if (SUCCEEDED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkA, (void **)&sl))) {
+    sl->lpVtbl->SetPath(sl, exePath); sl->lpVtbl->SetWorkingDirectory(sl, exeDir); sl->lpVtbl->SetDescription(sl, "Life Clock wallpaper");
+    if (SUCCEEDED(sl->lpVtbl->QueryInterface(sl, &IID_IPersistFile, (void **)&pf))) { wchar_t wp[MAX_PATH]; MultiByteToWideChar(CP_ACP, 0, p, -1, wp, MAX_PATH); ok = SUCCEEDED(pf->lpVtbl->Save(pf, wp, TRUE)); pf->lpVtbl->Release(pf); }
+    sl->lpVtbl->Release(sl); }
+  CoUninitialize(); logmsg("startup shortcut written: %d (%s)", ok, p); return ok;
+}
 static void tray_menu(HWND owner) {
   HMENU m = CreatePopupMenu();
   AppendMenuA(m, MF_STRING, ID_PAUSE, paused_manual ? "Resume" : "Pause");
@@ -327,6 +346,7 @@ static void tray_menu(HWND owner) {
   AppendMenuA(m, MF_SEPARATOR, 0, NULL);
   AppendMenuA(m, MF_STRING, ID_SETTINGS, "Open settings (life-clock.ini)");
   AppendMenuA(m, MF_STRING, ID_LOG, "Open log");
+  AppendMenuA(m, MF_STRING | (startup_installed() ? MF_CHECKED : 0), ID_STARTUP, "Start with Windows");
   AppendMenuA(m, MF_SEPARATOR, 0, NULL);
   AppendMenuA(m, MF_STRING, ID_QUIT, "Quit");
   POINT pt; GetCursorPos(&pt); SetForegroundWindow(owner);
@@ -335,6 +355,7 @@ static void tray_menu(HWND owner) {
   else if (cmd == ID_WATCH) ShellExecuteA(NULL, "open", exePath, "--fullscreen 1", exeDir, SW_SHOWNORMAL);
   else if (cmd == ID_SETTINGS) ShellExecuteA(NULL, "open", iniPath, NULL, exeDir, SW_SHOWNORMAL);
   else if (cmd == ID_LOG) ShellExecuteA(NULL, "open", logPath, NULL, exeDir, SW_SHOWNORMAL);
+  else if (cmd == ID_STARTUP) startup_install(!startup_installed());
   else if (cmd == ID_QUIT) PostQuitMessage(0);
 }
 // The tray icon needs a message window of its own: the wallpaper window lives
@@ -521,6 +542,9 @@ int main(int argc, char **argv) {
     if ((a[0] == '/' || a[0] == '-') && (a[1] == 'c' || a[1] == 'C') && (a[2] == 0 || a[2] == ':')) scrCfg = 1;
     if ((a[0] == '/' || a[0] == '-') && (a[1] == 'p' || a[1] == 'P') && (a[2] == 0 || a[2] == ':')) scrPreview = 1; }
   if (scrPreview) return 0;
+  for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--install-startup") || !strcmp(argv[i], "--uninstall-startup")) {
+    GetModuleFileNameA(NULL, exePath, MAX_PATH); strcpy(exeDir, exePath); char *sl = strrchr(exeDir, '\\'); if (sl) sl[1] = 0;
+    return startup_install(!strcmp(argv[i], "--install-startup")) ? 0 : 1; }
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--frame") && i + 1 < argc) cfg.frame = argv[i + 1];
     else if (!strcmp(argv[i], "--quit")) { int fs = 0; for (int j = 1; j < argc; j++) if (!strcmp(argv[j], "--fullscreen")) fs = 1;
@@ -570,7 +594,7 @@ int main(int argc, char **argv) {
     render(); if (cfg.afterglow > 0) for (int i = 0; i < 8; i++) { hl_advance(&uni, 32); render(); } GdiFlush(); write_bmp(cfg.frame); HlStats s = hl_stats(); logmsg("frame written: %s; nodes %d memo %u tables %.0f MB", cfg.frame, s.nodes, s.memo, s.bytes / 1e6); return 0;
   }
 
-  WNDCLASSA wc = { 0 }; wc.lpfnWndProc = wndproc; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "LifeClockWallpaper"; wc.hbrBackground = NULL; RegisterClassA(&wc);
+  WNDCLASSA wc = { 0 }; wc.lpfnWndProc = wndproc; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "LifeClockWallpaper"; wc.hbrBackground = NULL; wc.hIcon = LoadIconA(wc.hInstance, MAKEINTRESOURCEA(1)); RegisterClassA(&wc);
   hwnd = cfg.fullscreen ? CreateWindowExA(0, wc.lpszClassName, "Life Clock", WS_POPUP, monX, monY, W, H, NULL, NULL, wc.hInstance, NULL)
                         : CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "Life Clock", WS_POPUP, monX, monY, W, H, NULL, NULL, wc.hInstance, NULL);
   create_dib(W, H);
@@ -592,17 +616,19 @@ int main(int argc, char **argv) {
   QueryPerformanceCounter(&t1); logmsg("synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
 
   int stepGens = GPS / cfg.fps; DWORD frameMs = 1000 / cfg.fps; int paused = 0; DWORD lastOccl = 0; int frames = 0; double workMs = 0; DWORD lastReport = GetTickCount(); int onBattery = 0; DWORD lastIni = 0;
-  int attachVerified = cfg.fullscreen, attachTry = 0; DWORD visibleSince = 0;
+  int attachVerified = cfg.fullscreen, attachTry = 0; DWORD visibleSince = 0, recheckAt = 0;
   for (;;) {
     DWORD r = MsgWaitForMultipleObjects(1, &quitEv, FALSE, paused ? 1000 : frameMs, QS_ALLINPUT);
     if (r == WAIT_OBJECT_0) break;
     pump(); if (quitRequested) break;
     DWORD now = GetTickCount();
     if (!cfg.fullscreen && now - lastOccl > 1000 && (!IsWindow(hwnd) || (hostParent && !IsWindow(hostParent)))) {
+      // Explorer is restarting: wait until it has rebuilt the desktop (Progman with its shell view) before re-attaching.
+      HWND pm = FindWindowA("Progman", NULL); if (!pm || !FindWindowExA(pm, NULL, "SHELLDLL_DefView", NULL)) { static DWORD lastWait; if (now - lastWait > 5000) { lastWait = now; logmsg("desktop window gone; waiting for Explorer to rebuild the desktop"); } lastOccl = now; continue; }
       logmsg("desktop window gone (Explorer restart?): recreating");
       if (IsWindow(hwnd)) DestroyWindow(hwnd);
       hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "LifeClockWallpaper", "Life Clock", WS_POPUP, 0, 0, scrW, scrH, NULL, NULL, GetModuleHandleA(NULL), NULL);
-      hostParent = NULL; attach_to_desktop(); present(); lastOccl = now; continue;
+      hostParent = NULL; attach_to_desktop(); present(); lastOccl = now; attachVerified = 0; attachTry = 0; visibleSince = 0; continue;
     }
     if (now - lastIni > 2000) { lastIni = now;
       if (ini_changed()) { int oldColon = cfg.colonMode; load_settings(); build_palette(); setup_view(scrW, scrH); dibPainted = 0; if (cfg.colonMode != oldColon) load_snapshot(current_minute()); render(); present(); logmsg("settings reloaded: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain); }
@@ -615,10 +641,16 @@ int main(int argc, char **argv) {
         create_dib(w, h); SetWindowPos(hwnd, NULL, mx, my, w, h, SWP_NOZORDER | SWP_NOACTIVATE); setup_view(w, h); render(); present(); } }
     if (paused) { visibleSince = 0; continue; }
     if (!visibleSince) visibleSince = now;
+    if (recheckAt && now >= recheckAt) { recheckAt = 0; attachVerified = 0; attachTry = 0; }
     if (!attachVerified && now - visibleSince > 2500) { // the desktop has been visible for a while: is our picture on it?
-      if (screen_shows_us()) { attachVerified = 1; logmsg("attachment verified on screen (strategy %d)", cfg.attach); }
+      int r = screen_shows_us();
+      if (r < 0) visibleSince = now;   // could not tell (something covers the sample point); ask again later
+      else if (r) { attachVerified = 1; logmsg("attachment verified on screen (strategy %d)", cfg.attach); }
       else { int next = -1; while (attachTry < (int)(sizeof ATTACH_ORDER / sizeof ATTACH_ORDER[0])) { int c = ATTACH_ORDER[attachTry++]; if (c != cfg.attach) { next = c; break; } }
-        if (next < 0) { attachVerified = 1; logmsg("no attachment strategy verified; staying with %d", cfg.attach); }
+        if (next < 0) { // nothing verified: go back to the default and try the whole cycle again in five minutes
+          attachVerified = 1; attachTry = 0; logmsg("no attachment strategy verified; returning to 7, will re-check in 5 min");
+          if (cfg.attach != 7) { cfg.attach = 7; DestroyWindow(hwnd); hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "LifeClockWallpaper", "Life Clock", WS_POPUP, g_monX, g_monY, scrW, scrH, NULL, NULL, GetModuleHandleA(NULL), NULL); hostParent = NULL; attach_to_desktop(); dibPainted = 0; present(); }
+          recheckAt = now + 300000; }
         else { logmsg("not visible with strategy %d; trying %d", cfg.attach, next); cfg.attach = next;
           DestroyWindow(hwnd); hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "LifeClockWallpaper", "Life Clock", WS_POPUP, g_monX, g_monY, scrW, scrH, NULL, NULL, GetModuleHandleA(NULL), NULL);
           hostParent = NULL; attach_to_desktop(); dibPainted = 0; present(); visibleSince = now; continue; } }

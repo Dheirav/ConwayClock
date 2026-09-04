@@ -62,12 +62,17 @@ bottom of its children, beneath the icon list. DefView is a layered window
 whose surface is composed with per-pixel alpha, so the pixels must carry
 opaque alpha or the blend turns additive. `attach = N` selects the other
 strategies for other builds, and a watchdog recreates and re-attaches the
-window if Explorer restarts. The program also verifies itself: once the
+window once Explorer has rebuilt the desktop after a restart (tested: it
+re-attaches under the new shell view within a second). The program also
+verifies itself: once the
 desktop has been visible for a few seconds it captures a patch of the
 screen at the digits' centre and compares it with its own bitmap; if fewer
 than 70 % of the pixels match it moves to the next strategy, so a future
 Windows build that changes the layout again degrades to a logged fallback
-rather than a blank desktop.
+rather than a blank desktop. The check is skipped while another window,
+such as a topmost call window, covers the sample point, and if no strategy
+verifies it returns to the default and tries the cycle again in five
+minutes.
 
 ## Pausing
 
@@ -114,12 +119,13 @@ From WSL with Zig, no admin, no Windows toolchain:
 ```bash
 Z=~/.local/opt/zig-x86_64-linux-0.14.1/zig
 cd native && $Z cc -target x86_64-windows-gnu -O2 -o life-clock.exe \
-  main.c hashlife.c inflate.c colon.c snapshots_data.c \
-  -lgdi32 -luser32 -ldwmapi -lwtsapi32 -lshell32 -Wl,--subsystem,windows
+  main.c hashlife.c inflate.c colon.c snapshots_data.c life-clock.rc \
+  -lgdi32 -luser32 -ldwmapi -lwtsapi32 -lshell32 -lole32 -luuid -Wl,--subsystem,windows
 ```
 
 `snapshots_data.c` is generated from `snapshots/*.rle.gz` by
-`tools/gen-snapshot-data.py`. To regenerate the snapshots themselves
+`tools/gen-snapshot-data.py`; `life-clock.ico` (the 7-segment icon compiled
+in through `life-clock.rc`) by `tools/gen-icon.py`. To regenerate the snapshots themselves
 (needs Node): `tools/gensnapshots.js` with `START` and `END` minutes writes
 one every 10 minutes, about 6 s each; `tools/snapshot-progress.sh --watch`
 shows progress with an ETA from the measured rate. `tools/hashlife.js` is

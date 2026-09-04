@@ -40,7 +40,7 @@ in that dialog opens `life-clock.ini`.
 
 While running, an amber clock icon sits in the notification area (it may be
 in the overflow behind the ^ arrow). Right-click it for: Pause / Resume,
-Watch full screen, Open settings, Open log, Quit.
+Watch full screen, Open settings, Open log, Start with Windows, Quit.
 
 ## Watch mode
 
@@ -58,8 +58,14 @@ which pauses while the window covers the desktop.
 
 ## Start at login
 
-Win+R, type `shell:startup`, Enter, and put a shortcut to `life-clock.exe`
-in the folder that opens.
+Tick "Start with Windows" in the tray menu, or run:
+
+```
+life-clock.exe --install-startup
+```
+
+Either writes a shortcut into your Startup folder; `--uninstall-startup` or
+unticking removes it.
 
 ## Settings: `life-clock.ini`
 

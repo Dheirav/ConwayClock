@@ -39,6 +39,11 @@ Cost with the desktop visible: about 4 % of one core at the default 6 fps,
 - [Research](RESEARCH.md): the survey of hosts, engines and precomputation
   that led to this design.
 
+## Licence
+
+MIT for everything in this repository (see `LICENSE`). The pattern
+`clock.rle` is dim's and is CC BY-SA.
+
 ## Credits
 
 Pattern: dim, answer to "Build a digital clock in Conway's Game of Life" on
