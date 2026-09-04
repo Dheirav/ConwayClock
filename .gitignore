@@ -1,0 +1,11 @@
+# generated from snapshots/*.rle.gz by tools/gen-snapshot-data.py (28 MB)
+native/snapshots_data.c
+# build output (16 MB, rebuilt from source)
+native/life-clock.exe
+# runtime files the program writes next to itself
+native/life-clock.log
+native/life-clock.ini
+# snapshot generation bookkeeping
+snapshots/progress.json
+snapshots/*.log
+__pycache__/

@@ -1,0 +1,466 @@
+// Life Clock, native Windows wallpaper.
+//
+// Runs dim's Game-of-Life digital clock (clock.rle) in real time with the
+// Hashlife engine in hashlife.c, and draws it in a window parented behind
+// the desktop icons, presenting a frame only when a new generation lands.
+// Steps stop whenever the desktop is covered, the session is locked or the
+// display is off; on return the machine catches up in one jump.
+//
+// Settings live in life-clock.ini next to the executable (created with
+// defaults and comments on first run) and are reloaded live when the file
+// changes. Command-line flags with the same names override the file:
+//   life-clock.exe [--fps N] [--battery_fps N] [--view whole|display] [--palette NAME]
+//                  [--bg RRGGBB] [--cells RRGGBB] [--cells2 RRGGBB] [--gain N]
+//                  [--size F] [--hpos F] [--vpos F] [--monitor N] [--status 0|1]
+//                  [--quit] [--frame out.bmp]   (headless: sync, render once, exit)
+// Log: life-clock.log next to the executable.
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellapi.h>
+#include <dwmapi.h>
+#include <wtsapi32.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include "hashlife.h"
+#include "inflate.h"
+
+extern const int SNAP_COUNT; extern const int SNAP_MINUTE[]; extern const size_t SNAP_OFF[]; extern const unsigned char SNAP_DATA[];
+
+#define PERIOD 11520
+#define GPS 192
+#define DISPLAY_LAG 11450   // see index.html: never-early display
+#define PAT_W 10016
+#define PAT_H 6796
+static const struct { int x, y, w, h; } DISPLAY = { 1900, 3950, 8000, 2850 };
+
+static struct { int fps, batteryFps, view, gain, status, attach, monitor, pmMode; double vpos, hpos, size; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; } cfg;
+static void cfg_defaults(void) { memset(&cfg, 0, sizeof cfg); cfg.pmMode = 2; cfg.fps = 6; cfg.batteryFps = 3; cfg.gain = 40; cfg.attach = 7; cfg.vpos = 0.5; cfg.hpos = 0.5; cfg.size = 1.0; cfg.bg = 0x0f0907; cfg.cells = 0xa8e9ff; strcpy(cfg.palette, "amber"); }
+static int g_argc; static char **g_argv; static char iniPath[MAX_PATH]; static FILETIME iniTime;
+static FILE *logfile;
+static void logmsg(const char *fmt, ...) { if (!logfile) return; SYSTEMTIME t; GetLocalTime(&t); fprintf(logfile, "%02d:%02d:%02d ", t.wHour, t.wMinute, t.wSecond); va_list a; va_start(a, fmt); vfprintf(logfile, fmt, a); va_end(a); fputc('\n', logfile); fflush(logfile); }
+
+// ---- time model -------------------------------------------------------------
+// The machine's cycle is 24 hours: generation 0 shows 12:00 with the PM
+// indicator lit, so minute M of the cycle is M minutes after noon.
+static int cycle_minute(const SYSTEMTIME *t) { return ((t->wHour + 12) % 24) * 60 + t->wMinute; }
+static int64_t target_generation(void) {
+  SYSTEMTIME t; GetLocalTime(&t);
+  double s = t.wSecond + t.wMilliseconds / 1000.0;
+  return (int64_t)cycle_minute(&t) * PERIOD + DISPLAY_LAG + (int64_t)(s * GPS);
+}
+static int current_minute(void) { SYSTEMTIME t; GetLocalTime(&t); return cycle_minute(&t); }
+
+// ---- universe ----------------------------------------------------------------
+static Universe uni;
+static int load_snapshot(int minute) {
+  int best = 0; for (int i = 0; i < SNAP_COUNT; i++) if (SNAP_MINUTE[i] <= minute) best = i;
+  size_t len; uint8_t *text = gunzip(SNAP_DATA + SNAP_OFF[best], SNAP_OFF[best + 1] - SNAP_OFF[best], &len);
+  if (!text) { logmsg("snapshot %d: gunzip failed", best); return 0; }
+  int32_t n; Cell *cells = hl_parse_rle((const char *)text, 1, &n); free(text);
+  hl_from_cells(&uni, cells, n); free(cells);
+  uni.generation = (int64_t)SNAP_MINUTE[best] * PERIOD;
+  logmsg("loaded snapshot minute %d (%d cells) for minute %d", SNAP_MINUTE[best], n, minute);
+  return 1;
+}
+
+// ---- view & rendering ------------------------------------------------------------
+static struct { int x, y, w, h, z, pw, ph; } view;
+static void *dibBits; static int dibPainted; static HDC memdc;   // the screen DIB, its pixels (`pixels` aliases them once created) and its DC
+static int scrW, scrH;               // output size
+static uint8_t *dens;                // pw*ph density map
+static uint32_t *pixels;             // scrW*scrH BGRA
+static uint32_t lut[256];
+static int dstX, dstY, dstW, dstH;   // where the view lands on screen (letterboxed)
+static int *mapX, *mapY, *fracX, *fracY; static uint8_t *hrows; // per source row, horizontally resampled to dstW
+
+static uint32_t mix(DWORD a, DWORD b, double t) { // both BGR-packed; result BGRA opaque
+  int r = (int)((a & 255) + ((int)(b & 255) - (int)(a & 255)) * t), g = (int)(((a >> 8) & 255) + ((int)((b >> 8) & 255) - (int)((a >> 8) & 255)) * t), bl = (int)(((a >> 16) & 255) + ((int)((b >> 16) & 255) - (int)((a >> 16) & 255)) * t);
+  return 0xff000000u | (uint32_t)(bl | (g << 8) | (r << 16));
+}
+// Density -> colour. Presets set bg/cells unless overridden; cells2, if set,
+// makes a two-tone ramp (bg -> cells -> cells2 as density rises).
+static void build_palette(void) {
+  for (int i = 0; i < 256; i++) { double t = i * cfg.gain / 255.0; if (t > 1) t = 1;
+    lut[i] = cfg.hasCells2 ? (t < 0.5 ? mix(cfg.bg, cfg.cells, t * 2) : mix(cfg.cells, cfg.cells2, t * 2 - 1)) : mix(cfg.bg, cfg.cells, t); }
+}
+static void setup_view(int W, int H) {
+  scrW = W; scrH = H;
+  int rx, ry, rw, rh;
+  if (cfg.view == 1) { rx = DISPLAY.x; ry = DISPLAY.y; rw = DISPLAY.w; rh = DISPLAY.h; } else { rx = 0; ry = 0; rw = PAT_W; rh = PAT_H; }
+  int pad = (int)(rw * 0.03); rx -= pad; ry -= pad; rw += 2 * pad; rh += 2 * pad;
+  int z = 0; while ((rw >> z) > W * 1.6 || (rh >> z) > H * 1.6) z++;
+  // Centre horizontally on the display digits (they sit low and right within
+  // the machine). Vertically, put the digits' centre at fraction vpos of the
+  // view (0.5 = screen centre); the view keeps its height, so the top of the
+  // machine may be cut off and the bottom may show empty space.
+  double dcx = DISPLAY.x + DISPLAY.w / 2.0; double halfW = fmax(dcx - rx, rx + rw - dcx); rx = (int)(dcx - halfW); rw = (int)(2 * halfW);
+  if (cfg.view == 0) { double dcy = DISPLAY.y + DISPLAY.h / 2.0; int top = (int)(dcy - cfg.vpos * rh); if (top < ry) top = ry; ry = top; }
+  view.x = rx; view.y = ry; view.w = rw; view.h = rh; view.z = z; view.pw = (rw + (1 << z) - 1) >> z; view.ph = (rh + (1 << z) - 1) >> z;
+  free(dens); dens = calloc((size_t)view.pw * view.ph, 1);
+  if (!dibBits || pixels != (uint32_t *)dibBits) { free(pixels); pixels = calloc((size_t)W * H, 4); } else { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; } dibPainted = 0;
+  double scale = fmin((double)W / view.pw, (double)H / view.ph) * cfg.size;
+  dstW = (int)(view.pw * scale); dstH = (int)(view.ph * scale);
+  // The display's centre is at the middle of the view horizontally and at vpos of it vertically.
+  dstX = (int)(cfg.hpos * W - dstW / 2.0); dstY = (int)(cfg.vpos * H - cfg.vpos * dstH);
+  free(mapX); free(mapY); free(fracX); free(fracY); free(hrows); hrows = malloc((size_t)view.ph * dstW);
+  mapX = malloc(sizeof(int) * dstW); fracX = malloc(sizeof(int) * dstW); mapY = malloc(sizeof(int) * dstH); fracY = malloc(sizeof(int) * dstH);
+  for (int i = 0; i < dstW; i++) { double s = (i + 0.5) / scale - 0.5; if (s < 0) s = 0; int k = (int)s; if (k > view.pw - 2) k = view.pw - 2; mapX[i] = k; fracX[i] = (int)((s - k) * 256); }
+  for (int i = 0; i < dstH; i++) { double s = (i + 0.5) / scale - 0.5; if (s < 0) s = 0; int k = (int)s; if (k > view.ph - 2) k = view.ph - 2; mapY[i] = k; fracY[i] = (int)((s - k) * 256); }
+  logmsg("view: %dx%d cells at 1/%d -> %dx%d map -> %dx%d at (%d,%d) on %dx%d", rw, rh, 1 << z, view.pw, view.ph, dstW, dstH, dstX, dstY, W, H);
+}
+// Density map -> bilinear resample -> palette -> pixels.
+static double tRender, tResample, tPresent; static LARGE_INTEGER qpf; static int pmLit; static HFONT pmFont; static int pmFontH;
+static double qnow(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return (double)t.QuadPart * 1000.0 / qpf.QuadPart; }
+static void render(void) {
+  double a = qnow();
+  hl_density_cached(&uni, view.x, view.y, view.pw, view.ph, view.z, dens);
+  // The machine's AM/PM indicator: a box (pattern x 100..680, y 4150..4750) that is an
+  // outline in the morning and filled in the afternoon, next to a static "PM" label
+  // (x 700..1450). pm=text keeps the box, blanks the label, and writes AM or PM from
+  // the box's own state; pm=hide blanks both.
+  if (cfg.pmMode) {
+    int lx0 = ((cfg.pmMode == 1 ? 0 : 700) - view.x) >> view.z, lx1 = (1450 - view.x) >> view.z, ly0 = (4000 - view.y) >> view.z, ly1 = (4850 - view.y) >> view.z;
+    if (cfg.pmMode == 2) { long sum = 0; int bx0 = (100 - view.x) >> view.z, bx1 = (680 - view.x) >> view.z, by0 = (4150 - view.y) >> view.z, by1 = (4750 - view.y) >> view.z;
+      for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) if (y >= 0 && y < view.ph && x >= 0 && x < view.pw) sum += dens[(size_t)y * view.pw + x];
+      pmLit = sum > 7400; }   // measured in this region: outline 4,890 cells, filled 9,956
+    if (lx0 < 0) lx0 = 0; if (ly0 < 0) ly0 = 0; if (lx1 > view.pw) lx1 = view.pw; if (ly1 > view.ph) ly1 = view.ph;
+    for (int y = ly0; y < ly1; y++) memset(dens + (size_t)y * view.pw + lx0, 0, lx1 > lx0 ? lx1 - lx0 : 0);
+  }
+  double b = qnow(); tRender += b - a;
+  const int pw = view.pw, ph = view.ph, dw = dstW;
+  // Pass 1: each source row resampled horizontally once (gather).
+  for (int y = 0; y < ph; y++) { const uint8_t *r = dens + (size_t)y * pw; uint8_t *o = hrows + (size_t)y * dw;
+    for (int x = 0; x < dw; x++) { int k = mapX[x], fx = fracX[x]; o[x] = (uint8_t)((r[k] * (256 - fx) + r[k + 1] * fx) >> 8); } }
+  // Pass 2: blend two resampled rows (streaming, vectorisable) and apply the palette.
+  int y0 = dstY < 0 ? -dstY : 0, y1 = dstY + dstH > scrH ? scrH - dstY : dstH, x0 = dstX < 0 ? -dstX : 0, x1 = dstX + dw > scrW ? scrW - dstX : dw;
+  for (int y = y0; y < y1; y++) {
+    const uint8_t *a0 = hrows + (size_t)mapY[y] * dw, *a1 = a0 + dw; int fy = fracY[y], gy = 256 - fy;
+    uint32_t *out = pixels + (size_t)(dstY + y) * scrW + dstX;
+    for (int x = x0; x < x1; x++) out[x] = lut[(a0[x] * gy + a1[x] * fy) >> 8];
+  }
+  tResample += qnow() - b;
+  if (cfg.pmMode == 2 && memdc && pixels == (uint32_t *)dibBits) {
+    // Label position: the machine's own label area, in screen pixels.
+    double sc = (double)dstW / view.pw;
+    int cx = dstX + (int)((((760 + 1280) / 2 - view.x) >> view.z) * sc), cy = dstY + (int)((((4300 + 4600) / 2 - view.y) >> view.z) * sc);
+    int fh = (int)(((4600 - 4300) >> view.z) * sc * 1.6); if (fh < 12) fh = 12;
+    if (!pmFont || pmFontH != fh) { if (pmFont) DeleteObject(pmFont); pmFont = CreateFontA(-fh, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI"); pmFontH = fh; }
+    HGDIOBJ old = SelectObject(memdc, pmFont); SetBkMode(memdc, TRANSPARENT); SetTextColor(memdc, RGB(cfg.cells & 255, (cfg.cells >> 8) & 255, (cfg.cells >> 16) & 255)); SetTextAlign(memdc, TA_CENTER | TA_BASELINE);
+    GdiFlush(); TextOutA(memdc, cx, cy + fh / 3, pmLit ? "PM" : "AM", 2); SelectObject(memdc, old);
+  }
+}
+static int write_bmp(const char *path) {
+  FILE *f = fopen(path, "wb"); if (!f) return 0;
+  BITMAPFILEHEADER fh = { 0x4d42, (DWORD)(54 + (size_t)scrW * scrH * 4), 0, 0, 54 }; BITMAPINFOHEADER ih = { 40, scrW, -scrH, 1, 32, 0, 0, 0, 0, 0, 0 };
+  fwrite(&fh, 14, 1, f); fwrite(&ih, 40, 1, f); fwrite(pixels, 4, (size_t)scrW * scrH, f); fclose(f); return 1;
+}
+
+// ---- desktop window ------------------------------------------------------------------
+static HWND hwnd, hostParent; static int g_monX, g_monY; static HBITMAP dib;
+static HWND workerw_cb_result;
+static BOOL CALLBACK find_workerw(HWND h, LPARAM lp) { (void)lp; if (FindWindowExA(h, NULL, "SHELLDLL_DefView", NULL)) { workerw_cb_result = FindWindowExA(NULL, h, "WorkerW", NULL); return FALSE; } return TRUE; }
+static void attach_to_desktop(void) {
+  HWND progman = FindWindowA("Progman", NULL);
+  DWORD_PTR res; SendMessageTimeoutA(progman, 0x052C, 0xD, 0x1, SMTO_NORMAL, 1000, &res);
+  workerw_cb_result = NULL; EnumWindows(find_workerw, 0);
+  int raised = (GetWindowLongA(progman, GWL_EXSTYLE) & 0x00200000L /* WS_EX_NOREDIRECTIONBITMAP */) != 0;
+  if (workerw_cb_result) { RECT wr; GetWindowRect(workerw_cb_result, &wr); if (wr.right - wr.left < scrW / 2 || wr.bottom - wr.top < scrH / 2) { logmsg("ignoring undersized WorkerW %p", (void *)workerw_cb_result); workerw_cb_result = NULL; } }
+  if (raised && cfg.attach == 1) cfg.attach = 7;
+  LONG style = GetWindowLongA(hwnd, GWL_STYLE); SetWindowLongA(hwnd, GWL_STYLE, (style & ~WS_POPUP) | WS_CHILD);
+  if (workerw_cb_result && !raised) { SetParent(hwnd, workerw_cb_result); hostParent = workerw_cb_result; logmsg("attached under WorkerW %p (legacy layout)", (void *)workerw_cb_result); }
+  else if (cfg.attach == 2 || cfg.attach == 3) { // child of Progman's own WorkerW (the wallpaper surface)
+    HWND wallpaperW = FindWindowExA(progman, NULL, "WorkerW", NULL);
+    if (cfg.attach == 3) { SetWindowLongA(hwnd, GWL_EXSTYLE, GetWindowLongA(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED); SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA); }
+    SetParent(hwnd, wallpaperW ? wallpaperW : progman);
+    logmsg("attach %d: child of Progman's WorkerW %p", cfg.attach, (void *)wallpaperW);
+  }
+  else if (cfg.attach == 7 || cfg.attach == 8) {
+    // Windows 11 24H2/25H2 "raised desktop": Progman has WS_EX_NOREDIRECTIONBITMAP and
+    // its HWND children are not composed, but SHELLDLL_DefView is a layered window
+    // whose surface (with the icon list inside it) is. A child placed at the bottom
+    // of DefView sits beneath the icons and is composed with per-pixel alpha, so
+    // our pixels must be opaque (alpha 0xFF) or the blend turns additive.
+    HWND defview = FindWindowExA(progman, NULL, "SHELLDLL_DefView", NULL);
+    if (!defview) { logmsg("attach %d: no SHELLDLL_DefView under Progman", cfg.attach); return; }
+    SetParent(hwnd, defview); hostParent = defview;
+    SetWindowPos(hwnd, cfg.attach == 7 ? HWND_BOTTOM : HWND_TOP, g_monX, g_monY, scrW, scrH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    logmsg("attach %d: child of SHELLDLL_DefView %p", cfg.attach, (void *)defview); return;
+  }
+  else if (cfg.attach == 6) { // diagnostic: ordinary topmost window
+    SetWindowLongA(hwnd, GWL_STYLE, style);
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, scrW, scrH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    logmsg("attach 6: topmost diagnostic window"); return;
+  }
+  else if (cfg.attach == 5) { // plain top-level window kept at the bottom of the z-order
+    SetWindowLongA(hwnd, GWL_STYLE, style); // keep WS_POPUP
+    SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, scrW, scrH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    logmsg("attach 5: top-level window at HWND_BOTTOM"); return;
+  }
+  else if (cfg.attach == 4) { // diagnostic: layered child of Progman ABOVE DefView
+    SetWindowLongA(hwnd, GWL_EXSTYLE, GetWindowLongA(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED); SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+    SetParent(hwnd, progman); SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    logmsg("attach 4: layered child of Progman on top");
+  }
+  else { // Windows 11 24H2+: Progman has WS_EX_NOREDIRECTIONBITMAP and the desktop is
+    // composed by DWM; SHELLDLL_DefView and the wallpaper WorkerW are its children.
+    // Our window must be a layered child (its own DWM surface) or it is never
+    // composed, placed beneath DefView, with the WorkerW pushed to the bottom.
+    HWND defview = FindWindowExA(progman, NULL, "SHELLDLL_DefView", NULL);
+    HWND wallpaperW = FindWindowExA(progman, NULL, "WorkerW", NULL);
+    SetWindowLongA(hwnd, GWL_EXSTYLE, GetWindowLongA(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED);
+    SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+    SetParent(hwnd, progman);
+    if (defview) SetWindowPos(hwnd, defview, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (wallpaperW) SetWindowPos(wallpaperW, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    logmsg("attached under Progman (24H2 layout), defview %p, workerw %p", (void *)defview, (void *)wallpaperW);
+  }
+  SetWindowPos(hwnd, NULL, 0, 0, scrW, scrH, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+static void present(void) {
+  double a = qnow();
+  if (dibBits != (void *)pixels) memcpy(dibBits, pixels, (size_t)scrW * scrH * 4);
+  HDC dc = GetDC(hwnd);
+  // The letterbox borders never change: blit the full frame once, then only the machine's rectangle.
+  int bx = dstX < 0 ? 0 : dstX, by = dstY < 0 ? 0 : dstY, bw = (dstX + dstW > scrW ? scrW : dstX + dstW) - bx, bh = (dstY + dstH > scrH ? scrH : dstY + dstH) - by;
+  BOOL ok = dibPainted ? BitBlt(dc, bx, by, bw, bh, memdc, bx, by, SRCCOPY) : BitBlt(dc, 0, 0, scrW, scrH, memdc, 0, 0, SRCCOPY);
+  dibPainted = 1;
+  static int logged = 0; if (!logged) { logged = 1; RECT cr; GetClientRect(hwnd, &cr); logmsg("present: dc %p bitblt %d err %lu client %ldx%ld visible %d", (void *)dc, ok, GetLastError(), cr.right, cr.bottom, IsWindowVisible(hwnd)); }
+  if (cfg.status) { static char line[256]; HlStats s = hl_stats(); snprintf(line, sizeof line, "gen %lld  target %lld  nodes %d  memo %u", (long long)uni.generation, (long long)target_generation(), s.nodes, s.memo);
+    SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(107, 114, 128)); TextOutA(dc, 12, scrH - 24, line, (int)strlen(line)); }
+  ReleaseDC(hwnd, dc);
+  tPresent += qnow() - a;
+}
+static volatile int paused_lock = 0, paused_display = 0;
+static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+  switch (m) {
+    case WM_PAINT: { PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps); BitBlt(dc, 0, 0, scrW, scrH, memdc, 0, 0, SRCCOPY); EndPaint(h, &ps); return 0; }
+    case WM_ERASEBKGND: return 1;
+    case WM_PRINTCLIENT: BitBlt((HDC)w, 0, 0, scrW, scrH, memdc, 0, 0, SRCCOPY); return 0;
+    case WM_WTSSESSION_CHANGE: if (w == WTS_SESSION_LOCK) paused_lock = 1; else if (w == WTS_SESSION_UNLOCK) paused_lock = 0; return 0;
+    case WM_POWERBROADCAST: if (w == PBT_POWERSETTINGCHANGE) { POWERBROADCAST_SETTING *s = (POWERBROADCAST_SETTING *)l; if (s->DataLength >= 4) paused_display = (*(DWORD *)s->Data == 0); } return TRUE;
+    case WM_CLOSE: PostQuitMessage(0); return 0;
+  }
+  return DefWindowProcA(h, m, w, l);
+}
+// Is the primary monitor fully covered by other windows? (Chromium's approach:
+// walk top-level windows in z-order, subtract visible, uncloaked, non-minimized ones.)
+static HRGN occl_region; static RECT occl_screen; static char occl_dbg[512]; static int occl_dbg_n;
+static BOOL CALLBACK occl_cb(HWND h, LPARAM lp) {
+  (void)lp; if (h == hwnd || !IsWindowVisible(h) || IsIconic(h)) return TRUE;
+  char cls[64]; GetClassNameA(h, cls, sizeof cls);
+  // EnumWindows walks top to bottom. Reaching the desktop (Progman) means every
+  // window above it has been subtracted; whatever region is left is visible
+  // desktop. On the 24H2+ "raised desktop", Show Desktop lifts Progman above
+  // the apps instead of minimising them, so it is met first and nothing is
+  // subtracted at all.
+  if (!strcmp(cls, "Progman")) { size_t l = strlen(occl_dbg); snprintf(occl_dbg + l, sizeof occl_dbg - l, " [reached Progman]"); return FALSE; }
+  if (!strcmp(cls, "WorkerW")) return TRUE;
+  int cloaked = 0; DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof cloaked); if (cloaked) return TRUE;
+  LONG ex = GetWindowLongA(h, GWL_EXSTYLE);
+  if (ex & WS_EX_TRANSPARENT) return TRUE;                       // click-through overlays (game overlays, etc.) do not hide the desktop
+  if (ex & WS_EX_LAYERED) { BYTE alpha; DWORD flags;             // translucent or per-pixel-alpha windows: treat as not occluding
+    if (!GetLayeredWindowAttributes(h, NULL, &alpha, &flags) || ((flags & LWA_ALPHA) && alpha < 250) || (flags & LWA_COLORKEY)) return TRUE; }
+  RECT r; if (FAILED(DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof r))) GetWindowRect(h, &r);
+  if (r.right - r.left < 8 || r.bottom - r.top < 8) return TRUE;   // zero-size helper windows
+  HRGN wr = CreateRectRgnIndirect(&r); CombineRgn(occl_region, occl_region, wr, RGN_DIFF); DeleteObject(wr);
+  if (occl_dbg_n < 10) { size_t l = strlen(occl_dbg); snprintf(occl_dbg + l, sizeof occl_dbg - l, " [%s %ldx%ld]", cls, r.right - r.left, r.bottom - r.top); occl_dbg_n++; }
+  RECT box; return GetRgnBox(occl_region, &box) != NULLREGION;
+}
+static int desktop_covered(void) {
+  occl_screen.left = 0; occl_screen.top = 0; occl_screen.right = scrW; occl_screen.bottom = scrH;
+  occl_region = CreateRectRgnIndirect(&occl_screen); occl_dbg[0] = 0; occl_dbg_n = 0; EnumWindows(occl_cb, 0);
+  RECT box; int empty = GetRgnBox(occl_region, &box) == NULLREGION; DeleteObject(occl_region);
+  QUERY_USER_NOTIFICATION_STATE q; if (SUCCEEDED(SHQueryUserNotificationState(&q)) && (q == QUNS_RUNNING_D3D_FULL_SCREEN || q == QUNS_BUSY)) return 1;
+  return empty;
+}
+
+// ---- main -------------------------------------------------------------------
+// ---- settings: ini file + command line ---------------------------------------
+static const char *PRESETS[][3] = { { "amber", "07090f", "ffe9a8" }, { "green", "040a06", "5cff7a" }, { "white", "0a0a0a", "f2f2f2" }, { "blue", "070a14", "8cd2ff" }, { "red", "0c0605", "ff6b57" } };
+static DWORD parse_hex_bgr(const char *s) { unsigned v = (unsigned)strtoul(s[0] == '#' ? s + 1 : s, NULL, 16); return ((v & 0xff) << 16) | (v & 0xff00) | ((v >> 16) & 0xff); }
+static void apply_setting(const char *key, const char *val) {
+  if (!strcmp(key, "fps")) cfg.fps = atoi(val);
+  else if (!strcmp(key, "battery_fps")) cfg.batteryFps = atoi(val);
+  else if (!strcmp(key, "view")) cfg.view = !strcmp(val, "display");
+  else if (!strcmp(key, "gain")) cfg.gain = atoi(val);
+  else if (!strcmp(key, "size")) cfg.size = atof(val);
+  else if (!strcmp(key, "hpos")) cfg.hpos = atof(val);
+  else if (!strcmp(key, "vpos")) cfg.vpos = atof(val);
+  else if (!strcmp(key, "monitor")) cfg.monitor = atoi(val);
+  else if (!strcmp(key, "status")) cfg.status = atoi(val) || !strcmp(val, "on") || !strcmp(val, "true");
+  else if (!strcmp(key, "attach")) cfg.attach = atoi(val);
+  else if (!strcmp(key, "pm")) cfg.pmMode = !strcmp(val, "hide") ? 1 : !strcmp(val, "machine") ? 0 : 2; // 2 = text (default)
+  else if (!strcmp(key, "palette")) { strncpy(cfg.palette, val, 15); for (size_t i = 0; i < sizeof PRESETS / sizeof PRESETS[0]; i++) if (!strcmp(val, PRESETS[i][0])) { cfg.bg = parse_hex_bgr(PRESETS[i][1]); cfg.cells = parse_hex_bgr(PRESETS[i][2]); cfg.hasCells2 = 0; } }
+  else if (!strcmp(key, "bg")) cfg.bg = parse_hex_bgr(val);
+  else if (!strcmp(key, "cells")) cfg.cells = parse_hex_bgr(val);
+  else if (!strcmp(key, "cells2")) { if (val[0] && strcmp(val, "none")) { cfg.cells2 = parse_hex_bgr(val); cfg.hasCells2 = 1; } else cfg.hasCells2 = 0; }
+}
+static void clamp_settings(void) {
+  if (cfg.fps != 3 && cfg.fps != 6 && cfg.fps != 12 && cfg.fps != 24) cfg.fps = 6;
+  if (cfg.batteryFps != 1 && cfg.batteryFps != 3 && cfg.batteryFps != 6 && cfg.batteryFps != 12 && cfg.batteryFps != 24) cfg.batteryFps = 3;
+  if (cfg.gain < 1) cfg.gain = 1; if (cfg.gain > 255) cfg.gain = 255;
+  if (cfg.size < 0.3) cfg.size = 0.3; if (cfg.size > 2.0) cfg.size = 2.0;
+  if (cfg.hpos < 0.0) cfg.hpos = 0.0; if (cfg.hpos > 1.0) cfg.hpos = 1.0;
+  if (cfg.vpos < 0.2) cfg.vpos = 0.2; if (cfg.vpos > 0.9) cfg.vpos = 0.9;
+}
+static const char *INI_TEMPLATE =
+"; Life Clock settings. Edit and save: the wallpaper reloads this file within 2 s.\n"
+"; Nothing here costs CPU while running; colours and layout are applied once per change.\n"
+"\n"
+"; Frames per second: 3, 6, 12 or 24 (generations per frame = 192 / fps). Lower = less CPU.\n"
+"fps = 6\n"
+"; Frame rate while on battery: 1, 3, 6, 12 or 24.\n"
+"battery_fps = 3\n"
+"\n"
+"; whole = the machine (top cropped depending on vpos), display = just the 7-segment display.\n"
+"view = whole\n"
+"; Size relative to the largest fit (1.0 = fills the screen width; >1 crops; 0.5 = half).\n"
+"size = 1.0\n"
+"; Where the digits' centre sits: fraction of the screen width / height.\n"
+"hpos = 0.5\n"
+"vpos = 0.5\n"
+"; Monitor index (0 = primary).\n"
+"monitor = 0\n"
+"\n"
+"; Colours. palette = amber | green | white | blue | red, or set bg / cells / cells2 yourself\n"
+"; (RRGGBB). cells2, if set, is the colour of the densest areas (two-tone ramp); 'none' disables.\n"
+"palette = amber\n"
+"; bg = 07090f\n"
+"; cells = ffe9a8\n"
+"cells2 = none\n"
+"; Brightness of one live cell in a zoomed-out pixel (5-120).\n"
+"gain = 40\n"
+"\n"
+"; AM/PM: the machine has a box that is an outline in the morning and filled in the afternoon,\n"
+"; next to a static 'PM' label. text = keep the box and write AM or PM from its state (default),\n"
+"; machine = show exactly as drawn, hide = blank that corner.\n"
+"pm = text\n"
+"\n"
+"; Small stats line in the corner: 0 or 1.\n"
+"status = 0\n";
+static void load_ini(void) {
+  FILE *f = fopen(iniPath, "r");
+  if (!f) { f = fopen(iniPath, "w"); if (f) { fputs(INI_TEMPLATE, f); fclose(f); logmsg("wrote default %s", iniPath); } return; }
+  char line[256];
+  while (fgets(line, sizeof line, f)) {
+    char *p = line; while (*p == ' ' || *p == '\t') p++; if (*p == ';' || *p == '#' || *p == '\n' || *p == 0) continue;
+    char *eq = strchr(p, '='); if (!eq) continue; *eq = 0; char *k = p, *v = eq + 1;
+    char *e = k + strlen(k); while (e > k && (e[-1] == ' ' || e[-1] == '\t')) *--e = 0;
+    while (*v == ' ' || *v == '\t') v++; e = v + strlen(v); while (e > v && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
+    char *c = strchr(v, ';'); if (c) { *c = 0; e = v + strlen(v); while (e > v && e[-1] == ' ') *--e = 0; }
+    apply_setting(k, v);
+  }
+  fclose(f);
+}
+static void apply_args(void) {
+  for (int i = 1; i < g_argc; i++) if (g_argv[i][0] == '-' && g_argv[i][1] == '-' && i + 1 < g_argc && g_argv[i + 1][0] != '-') { apply_setting(g_argv[i] + 2, g_argv[i + 1]); i++; }
+    else if (!strcmp(g_argv[i], "--status")) cfg.status = 1;
+}
+static int ini_changed(void) {
+  WIN32_FILE_ATTRIBUTE_DATA a; if (!GetFileAttributesExA(iniPath, GetFileExInfoStandard, &a)) return 0;
+  if (CompareFileTime(&a.ftLastWriteTime, &iniTime) == 0) return 0; iniTime = a.ftLastWriteTime; return 1;
+}
+static void load_settings(void) { cfg_defaults(); load_ini(); apply_args(); clamp_settings(); }
+
+BOOL CALLBACK monproc(HMONITOR h, HDC dc, LPRECT r, LPARAM lp) { (void)dc; (void)r; struct { RECT *r; int *n; HMONITOR prim; } *ctx = (void *)lp; if (h == ctx->prim || *ctx->n >= 8) return TRUE; MONITORINFO mi = { sizeof mi }; GetMonitorInfoA(h, &mi); ctx->r[(*ctx->n)++] = mi.rcMonitor; return TRUE; }
+static void pump(void) { MSG m; while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageA(&m); } }
+
+int main(int argc, char **argv) {
+  g_argc = argc; g_argv = argv;
+  for (int i = 1; i < argc; i++) {
+    if (!strcmp(argv[i], "--frame") && i + 1 < argc) cfg.frame = argv[i + 1];
+    else if (!strcmp(argv[i], "--quit")) { HANDLE ev = OpenEventA(EVENT_MODIFY_STATE, FALSE, "LifeClockWallpaperQuit"); if (ev) { SetEvent(ev); CloseHandle(ev); return 0; } return 1; }
+  }
+  const char *frameArg = cfg.frame;
+  char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH); char *slash = strrchr(exe, '\\'); if (slash) slash[1] = 0;
+  char logpath[MAX_PATH]; snprintf(logpath, sizeof logpath, "%slife-clock.log", exe); logfile = fopen(logpath, "a");
+  snprintf(iniPath, sizeof iniPath, "%slife-clock.ini", exe);
+  load_settings(); cfg.frame = frameArg; ini_changed();
+  logmsg("start: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d frame %s", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain, cfg.frame ? cfg.frame : "-");
+
+  HANDLE mutex = NULL;
+  if (!cfg.frame) { mutex = CreateMutexA(NULL, TRUE, "LifeClockWallpaper"); if (GetLastError() == ERROR_ALREADY_EXISTS) { logmsg("already running"); return 2; } }
+  HANDLE quitEv = CreateEventA(NULL, TRUE, FALSE, "LifeClockWallpaperQuit");
+
+  typedef BOOL (WINAPI *SetCtx)(HANDLE); SetCtx setctx = (SetCtx)GetProcAddress(GetModuleHandleA("user32.dll"), "SetProcessDpiAwarenessContext");
+  BOOL dpiok = setctx ? setctx((HANDLE)-4 /* PER_MONITOR_AWARE_V2 */) : SetProcessDPIAware();
+  DWORD dpierr = GetLastError();
+  int W = GetSystemMetrics(SM_CXSCREEN), H = GetSystemMetrics(SM_CYSCREEN); int monX = 0, monY = 0;
+  { // monitor N: enumerate, primary first
+    RECT mons[8]; int nm = 0; BOOL CALLBACK monproc(HMONITOR, HDC, LPRECT, LPARAM);
+    HMONITOR prim = MonitorFromPoint((POINT){ 0, 0 }, MONITOR_DEFAULTTOPRIMARY); MONITORINFO mi = { sizeof mi }; GetMonitorInfoA(prim, &mi); mons[nm++] = mi.rcMonitor;
+    EnumDisplayMonitors(NULL, NULL, monproc, (LPARAM)&(struct { RECT *r; int *n; HMONITOR prim; }){ mons, &nm, prim });
+    int idx = cfg.monitor; if (idx < 0 || idx >= nm) idx = 0;
+    monX = mons[idx].left; monY = mons[idx].top; W = mons[idx].right - mons[idx].left; H = mons[idx].bottom - mons[idx].top;
+    logmsg("monitors: %d; using %d at (%d,%d) %dx%d", nm, idx, monX, monY, W, H); g_monX = monX; g_monY = monY; }
+  { DEVMODEA dm = { 0 }; dm.dmSize = sizeof dm; EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm);
+    typedef UINT (WINAPI *GDFS)(void); GDFS gdfs = (GDFS)GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForSystem");
+    logmsg("dpi: awareness call ok=%d err=%lu, metrics %dx%d, display mode %lux%lu, system dpi %u", dpiok, dpierr, W, H, dm.dmPelsWidth, dm.dmPelsHeight, gdfs ? gdfs() : 0); }
+
+  QueryPerformanceFrequency(&qpf); hl_init(); build_palette();
+  LARGE_INTEGER freq, t0, t1; QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&t0);
+  if (!load_snapshot(current_minute())) return 3;
+  setup_view(W, H);
+
+  if (cfg.frame) { // headless: sync, render into a memory DIB (so text overlays work), dump
+    HDC sdc = GetDC(NULL); memdc = CreateCompatibleDC(sdc); ReleaseDC(NULL, sdc);
+    BITMAPINFO bi = { 0 }; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+    dib = CreateDIBSection(memdc, &bi, DIB_RGB_COLORS, &dibBits, NULL, 0); SelectObject(memdc, dib);
+    free(pixels); pixels = (uint32_t *)dibBits;
+    { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; }
+    int64_t target = target_generation(); while (target - uni.generation >= GPS) { int64_t step = target - uni.generation; if (step > PERIOD) step = PERIOD; hl_advance(&uni, step); target = target_generation(); }
+    QueryPerformanceCounter(&t1); logmsg("synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
+    render(); GdiFlush(); write_bmp(cfg.frame); HlStats s = hl_stats(); logmsg("frame written: %s; nodes %d memo %u tables %.0f MB", cfg.frame, s.nodes, s.memo, s.bytes / 1e6); return 0;
+  }
+
+  WNDCLASSA wc = { 0 }; wc.lpfnWndProc = wndproc; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "LifeClockWallpaper"; wc.hbrBackground = NULL; RegisterClassA(&wc);
+  hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "Life Clock", WS_POPUP, monX, monY, W, H, NULL, NULL, wc.hInstance, NULL);
+  HDC sdc = GetDC(NULL); memdc = CreateCompatibleDC(sdc); ReleaseDC(NULL, sdc);
+  BITMAPINFO bi = { 0 }; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+  dib = CreateDIBSection(memdc, &bi, DIB_RGB_COLORS, &dibBits, NULL, 0); SelectObject(memdc, dib);
+  free(pixels); pixels = (uint32_t *)dibBits; { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; }
+  render();
+  attach_to_desktop(); present();
+  { typedef UINT (WINAPI *GDFW)(HWND); GDFW gdfw = (GDFW)GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForWindow"); RECT wr; GetWindowRect(hwnd, &wr);
+    logmsg("window: dpi %u, rect (%ld,%ld)-(%ld,%ld), parent %p", gdfw ? gdfw(hwnd) : 0, wr.left, wr.top, wr.right, wr.bottom, (void *)GetParent(hwnd)); }
+  WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+  { GUID g = { 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 } }; /* GUID_CONSOLE_DISPLAY_STATE */ RegisterPowerSettingNotification(hwnd, &g, DEVICE_NOTIFY_WINDOW_HANDLE); }
+
+  // Sync in slices, presenting the frozen snapshot meanwhile.
+  int64_t target = target_generation();
+  while (target - uni.generation >= GPS) { int64_t step = target - uni.generation; if (step > PERIOD) step = PERIOD; hl_advance(&uni, step); render(); present(); pump(); target = target_generation(); }
+  QueryPerformanceCounter(&t1); logmsg("synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
+
+  int stepGens = GPS / cfg.fps; DWORD frameMs = 1000 / cfg.fps; int paused = 0; DWORD lastOccl = 0; int frames = 0; double workMs = 0; DWORD lastReport = GetTickCount(); int onBattery = 0; DWORD lastIni = 0;
+  for (;;) {
+    DWORD r = MsgWaitForMultipleObjects(1, &quitEv, FALSE, paused ? 1000 : frameMs, QS_ALLINPUT);
+    if (r == WAIT_OBJECT_0) break;
+    pump();
+    DWORD now = GetTickCount();
+    if (now - lastOccl > 1000 && (!IsWindow(hwnd) || (hostParent && !IsWindow(hostParent)))) {
+      logmsg("desktop window gone (Explorer restart?): recreating");
+      if (IsWindow(hwnd)) DestroyWindow(hwnd);
+      hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "LifeClockWallpaper", "Life Clock", WS_POPUP, 0, 0, scrW, scrH, NULL, NULL, GetModuleHandleA(NULL), NULL);
+      hostParent = NULL; attach_to_desktop(); present(); lastOccl = now; continue;
+    }
+    if (now - lastIni > 2000) { lastIni = now;
+      if (ini_changed()) { load_settings(); build_palette(); setup_view(scrW, scrH); dibPainted = 0; render(); present(); logmsg("settings reloaded: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain); }
+      SYSTEM_POWER_STATUS ps; GetSystemPowerStatus(&ps); onBattery = (ps.ACLineStatus == 0);
+      int f = onBattery ? cfg.batteryFps : cfg.fps; stepGens = GPS / f; frameMs = 1000 / f; }
+    if (now - lastOccl > 1000) { lastOccl = now;
+      int p = paused_lock || paused_display || desktop_covered(); if (p != paused) { paused = p; if (paused) logmsg("paused (lock %d display-off %d; windows subtracted:%s)", paused_lock, paused_display, occl_dbg); else logmsg("resumed"); } }
+    if (paused) continue;
+    LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
+    target = target_generation(); int64_t behind = target - uni.generation;
+    if (behind < -PERIOD || behind > 30 * PERIOD) { logmsg("resync: behind %lld", (long long)behind); load_snapshot(current_minute()); continue; }
+    int n = 0; while (behind >= stepGens && n < 8) { hl_advance(&uni, stepGens); behind -= stepGens; n++; }
+    if (behind >= stepGens) { hl_advance(&uni, behind - behind % stepGens); n++; } // long pause: one jump
+    if (n) { render(); present(); frames++; }
+    HlStats s = hl_stats(); if (s.nodes > 3000000) { HlGcResult g = hl_gc(&uni); logmsg("gc: %d -> %d nodes", g.before, g.after); }
+    QueryPerformanceCounter(&b); workMs += (double)(b.QuadPart - a.QuadPart) * 1000.0 / freq.QuadPart;
+    if (now - lastReport > 60000) { logmsg("last minute: %d frames, work %.0f ms = %.2f%% of one core [render %.1f, resample %.1f, present %.1f ms/frame], nodes %d, memo %u, tables %.0f MB", frames, workMs, workMs / 600.0, frames ? tRender / frames : 0, frames ? tResample / frames : 0, frames ? tPresent / frames : 0, s.nodes, s.memo, s.bytes / 1e6); frames = 0; workMs = 0; tRender = tResample = tPresent = 0; lastReport = now; }
+  }
+  logmsg("quit"); if (mutex) CloseHandle(mutex); return 0;
+}
