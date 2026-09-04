@@ -37,7 +37,7 @@ extern const int SNAP_COUNT; extern const int SNAP_MINUTE[]; extern const size_t
 #define PAT_H 6796
 static const struct { int x, y, w, h; } DISPLAY = { 1900, 3950, 8000, 2850 };
 
-static struct { int fps, batteryFps, view, gain, status, attach, monitor, pmMode, colonMode, zoom, fullscreen; double vpos, hpos, size; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; } cfg;
+static struct { int fps, batteryFps, view, gain, status, attach, monitor, pmMode, colonMode, zoom, fullscreen, screensaver; double vpos, hpos, size, afterglow; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; } cfg;
 static void cfg_defaults(void) { memset(&cfg, 0, sizeof cfg); cfg.pmMode = 3; cfg.colonMode = 1; cfg.fps = 6; cfg.batteryFps = 3; cfg.gain = 40; cfg.attach = 7; cfg.vpos = 0.5; cfg.hpos = 0.5; cfg.size = 1.0; cfg.bg = 0x0f0907; cfg.cells = 0xa8e9ff; strcpy(cfg.palette, "amber"); }
 static int g_argc; static char **g_argv; static char iniPath[MAX_PATH]; static FILETIME iniTime;
 static FILE *logfile; static char logPath[MAX_PATH]; static int logDay = -1;
@@ -96,6 +96,7 @@ static void build_palette(void) {
     lut[i] = cfg.hasCells2 ? (t < 0.5 ? mix(cfg.bg, cfg.cells, t * 2) : mix(cfg.cells, cfg.cells2, t * 2 - 1)) : mix(cfg.bg, cfg.cells, t); }
 }
 static int unitScale; // 1 when one map pixel is one screen pixel (no resample needed)
+static uint8_t *glow;  // afterglow buffer, same size as the density map
 static void setup_view(int W, int H) {
   scrW = W; scrH = H;
   int rx, ry, rw, rh;
@@ -104,7 +105,7 @@ static void setup_view(int W, int H) {
     double dcx = DISPLAY.x + DISPLAY.w / 2.0, dcy = DISPLAY.y + DISPLAY.h / 2.0;
     view.z = z; view.pw = (int)ceil(W / cfg.size); view.ph = (int)ceil(H / cfg.size);
     view.w = view.pw << z; view.h = view.ph << z; view.x = (int)(dcx - cfg.hpos * view.w); view.y = (int)(dcy - cfg.vpos * view.h);
-    free(dens); dens = calloc((size_t)view.pw * view.ph, 1);
+    free(dens); dens = calloc((size_t)view.pw * view.ph, 1); free(glow); glow = calloc((size_t)view.pw * view.ph, 1);
     if (!dibBits || pixels != (uint32_t *)dibBits) { free(pixels); pixels = calloc((size_t)W * H, 4); } else { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; } dibPainted = 0;
     dstW = (int)(view.pw * cfg.size); dstH = (int)(view.ph * cfg.size); dstX = 0; dstY = 0; unitScale = (cfg.size == 1.0);
     free(mapX); free(mapY); free(fracX); free(fracY); free(hrows);
@@ -125,7 +126,7 @@ static void setup_view(int W, int H) {
   double dcx = DISPLAY.x + DISPLAY.w / 2.0; double halfW = fmax(dcx - rx, rx + rw - dcx); rx = (int)(dcx - halfW); rw = (int)(2 * halfW);
   if (cfg.view == 0) { double dcy = DISPLAY.y + DISPLAY.h / 2.0; int top = (int)(dcy - cfg.vpos * rh); if (top < ry) top = ry; ry = top; }
   view.x = rx; view.y = ry; view.w = rw; view.h = rh; view.z = z; view.pw = (rw + (1 << z) - 1) >> z; view.ph = (rh + (1 << z) - 1) >> z;
-  free(dens); dens = calloc((size_t)view.pw * view.ph, 1);
+  free(dens); dens = calloc((size_t)view.pw * view.ph, 1); free(glow); glow = calloc((size_t)view.pw * view.ph, 1);
   if (!dibBits || pixels != (uint32_t *)dibBits) { free(pixels); pixels = calloc((size_t)W * H, 4); } else { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; } dibPainted = 0;
   double scale = fmin((double)W / view.pw, (double)H / view.ph) * cfg.size;
   dstW = (int)(view.pw * scale); dstH = (int)(view.ph * scale);
@@ -155,6 +156,9 @@ static void render(void) {
     if (lx0 < 0) lx0 = 0; if (ly0 < 0) ly0 = 0; if (lx1 > view.pw) lx1 = view.pw; if (ly1 > view.ph) ly1 = view.ph;
     for (int y = ly0; y < ly1; y++) memset(dens + (size_t)y * view.pw + lx0, 0, lx1 > lx0 ? lx1 - lx0 : 0);
   }
+  if (cfg.afterglow > 0) { // trails: each map pixel keeps a decaying maximum of what has been there
+    int k = (int)(cfg.afterglow * 256); size_t n = (size_t)view.pw * view.ph;
+    for (size_t i = 0; i < n; i++) { int v = dens[i], g = glow[i]; if (v > g) g = v; dens[i] = (uint8_t)g; glow[i] = (uint8_t)((g * k) >> 8); } }
   double b = qnow(); tRender += b - a;
   const int pw = view.pw, ph = view.ph, dw = dstW;
   if (unitScale) { // one map pixel per screen pixel: palette lookup only
@@ -201,13 +205,28 @@ static int write_bmp(const char *path) {
 static HWND hwnd, hostParent; static int g_monX, g_monY; static HBITMAP dib;
 static HWND workerw_cb_result;
 static BOOL CALLBACK find_workerw(HWND h, LPARAM lp) { (void)lp; if (FindWindowExA(h, NULL, "SHELLDLL_DefView", NULL)) { workerw_cb_result = FindWindowExA(NULL, h, "WorkerW", NULL); return FALSE; } return TRUE; }
+// Does the screen actually show our pixels? Compare a patch at the digits'
+// centre with what we drew. Only meaningful while the desktop is visible.
+static int screen_shows_us(void) {
+  double sc = (double)dstW / view.pw;
+  int cx = dstX + (int)(((5900 - view.x) >> view.z) * sc), cy = dstY + (int)(((5375 - view.y) >> view.z) * sc), R = 48;
+  int x0 = cx - R, y0 = cy - R; if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x0 + 2 * R > scrW) x0 = scrW - 2 * R; if (y0 + 2 * R > scrH) y0 = scrH - 2 * R;
+  HDC sdc = GetDC(NULL), mdc = CreateCompatibleDC(sdc); BITMAPINFO bi = { 0 }; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = 2 * R; bi.bmiHeader.biHeight = -2 * R; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+  uint32_t *cap; HBITMAP bm = CreateDIBSection(mdc, &bi, DIB_RGB_COLORS, (void **)&cap, NULL, 0); SelectObject(mdc, bm);
+  BitBlt(mdc, 0, 0, 2 * R, 2 * R, sdc, g_monX + x0, g_monY + y0, SRCCOPY | CAPTUREBLT); GdiFlush();
+  int same = 0, total = 4 * R * R;
+  for (int y = 0; y < 2 * R; y++) for (int x = 0; x < 2 * R; x++) if ((cap[y * 2 * R + x] & 0xffffff) == (pixels[(size_t)(y0 + y) * scrW + x0 + x] & 0xffffff)) same++;
+  DeleteObject(bm); DeleteDC(mdc); ReleaseDC(NULL, sdc);
+  logmsg("screen check at (%d,%d): %d%% of the patch matches", x0, y0, same * 100 / total);
+  return same * 10 >= total * 7;
+}
+static const int ATTACH_ORDER[] = { 7, 1, 2, 3, 5 };
 static void attach_to_desktop(void) {
   HWND progman = FindWindowA("Progman", NULL);
   DWORD_PTR res; SendMessageTimeoutA(progman, 0x052C, 0xD, 0x1, SMTO_NORMAL, 1000, &res);
   workerw_cb_result = NULL; EnumWindows(find_workerw, 0);
   int raised = (GetWindowLongA(progman, GWL_EXSTYLE) & 0x00200000L /* WS_EX_NOREDIRECTIONBITMAP */) != 0;
   if (workerw_cb_result) { RECT wr; GetWindowRect(workerw_cb_result, &wr); if (wr.right - wr.left < scrW / 2 || wr.bottom - wr.top < scrH / 2) { logmsg("ignoring undersized WorkerW %p", (void *)workerw_cb_result); workerw_cb_result = NULL; } }
-  if (raised && cfg.attach == 1) cfg.attach = 7;
   LONG style = GetWindowLongA(hwnd, GWL_STYLE); SetWindowLongA(hwnd, GWL_STYLE, (style & ~WS_POPUP) | WS_CHILD);
   if (workerw_cb_result && !raised) { SetParent(hwnd, workerw_cb_result); hostParent = workerw_cb_result; logmsg("attached under WorkerW %p (legacy layout)", (void *)workerw_cb_result); }
   else if (cfg.attach == 2 || cfg.attach == 3) { // child of Progman's own WorkerW (the wallpaper surface)
@@ -272,7 +291,15 @@ static void present(void) {
   ReleaseDC(hwnd, dc);
   tPresent += qnow() - a;
 }
-static volatile int paused_lock = 0, paused_display = 0, paused_manual = 0;
+static volatile int paused_lock = 0, paused_display = 0, paused_manual = 0, displayChanged = 0;
+static void create_dib(int W, int H) {
+  if (dib) { DeleteObject(dib); dib = NULL; }
+  if (!memdc) { HDC sdc = GetDC(NULL); memdc = CreateCompatibleDC(sdc); ReleaseDC(NULL, sdc); }
+  BITMAPINFO bi = { 0 }; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+  dib = CreateDIBSection(memdc, &bi, DIB_RGB_COLORS, &dibBits, NULL, 0); SelectObject(memdc, dib);
+  if (pixels && pixels != (uint32_t *)dibBits) free(pixels); pixels = (uint32_t *)dibBits;
+  uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; dibPainted = 0;
+}
 #define WM_TRAY (WM_APP + 1)
 #define ID_PAUSE 1
 #define ID_WATCH 2
@@ -325,7 +352,9 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_WTSSESSION_CHANGE: if (w == WTS_SESSION_LOCK) paused_lock = 1; else if (w == WTS_SESSION_UNLOCK) paused_lock = 0; return 0;
     case WM_POWERBROADCAST: if (w == PBT_POWERSETTINGCHANGE) { POWERBROADCAST_SETTING *s = (POWERBROADCAST_SETTING *)l; if (s->DataLength >= 4) paused_display = (*(DWORD *)s->Data == 0); } return TRUE;
     case WM_CLOSE: PostQuitMessage(0); return 0;
-    case WM_KEYDOWN: if (!cfg.fullscreen) return 0;
+    case WM_DISPLAYCHANGE: case 0x02E0 /* WM_DPICHANGED */: displayChanged = 1; return 0;
+    case WM_MOUSEMOVE: if (cfg.screensaver) { static POINT first = { -1, -1 }; POINT pt; GetCursorPos(&pt); if (first.x < 0) first = pt; else if (abs(pt.x - first.x) > 12 || abs(pt.y - first.y) > 12) PostQuitMessage(0); } return 0;
+    case WM_KEYDOWN: if (cfg.screensaver) { PostQuitMessage(0); return 0; } if (!cfg.fullscreen) return 0;
       if (w == VK_ESCAPE || w == 'Q') PostQuitMessage(0);
       else if (w == VK_ADD || w == VK_OEM_PLUS || w == VK_UP) { if (cfg.zoom > 1) { cfg.zoom /= 2; setup_view(scrW, scrH); } }
       else if (w == VK_SUBTRACT || w == VK_OEM_MINUS || w == VK_DOWN) { if (cfg.zoom < 16) { cfg.zoom *= 2; setup_view(scrW, scrH); } }
@@ -384,6 +413,7 @@ static void apply_setting(const char *key, const char *val) {
   else if (!strcmp(key, "status")) cfg.status = atoi(val) || !strcmp(val, "on") || !strcmp(val, "true");
   else if (!strcmp(key, "attach")) cfg.attach = atoi(val);
   else if (!strcmp(key, "pm")) cfg.pmMode = !strcmp(val, "hide") ? 1 : !strcmp(val, "machine") ? 0 : !strcmp(val, "text") ? 2 : 3; // 3 = dot (default)
+  else if (!strcmp(key, "afterglow")) cfg.afterglow = atof(val);
   else if (!strcmp(key, "zoom")) cfg.zoom = !strcmp(val, "auto") ? 0 : atoi(val);
   else if (!strcmp(key, "fullscreen")) cfg.fullscreen = atoi(val) || !strcmp(val, "true");
   else if (!strcmp(key, "colon")) cfg.colonMode = !strcmp(val, "machine") ? 0 : !strcmp(val, "hide") ? 2 : 1; // 1 = pulse (default)
@@ -396,6 +426,7 @@ static void clamp_settings(void) {
   if (cfg.fps != 3 && cfg.fps != 6 && cfg.fps != 12 && cfg.fps != 24) cfg.fps = 6;
   if (cfg.batteryFps != 1 && cfg.batteryFps != 3 && cfg.batteryFps != 6 && cfg.batteryFps != 12 && cfg.batteryFps != 24) cfg.batteryFps = 3;
   if (cfg.gain < 1) cfg.gain = 1; if (cfg.gain > 255) cfg.gain = 255;
+  if (cfg.afterglow < 0) cfg.afterglow = 0; if (cfg.afterglow > 0.95) cfg.afterglow = 0.95;
   if (cfg.zoom != 0 && cfg.zoom != 1 && cfg.zoom != 2 && cfg.zoom != 4 && cfg.zoom != 8 && cfg.zoom != 16) cfg.zoom = 0;
   if (cfg.size < 0.3) cfg.size = 0.3; if (cfg.size > 2.0) cfg.size = 2.0;
   if (cfg.hpos < 0.0) cfg.hpos = 0.0; if (cfg.hpos > 1.0) cfg.hpos = 1.0;
@@ -437,6 +468,9 @@ static const char *INI_TEMPLATE =
 "; oscillators) so the dots breathe under Life's rules (default); machine = as drawn; hide.\n"
 "colon = pulse\n"
 "\n"
+"; Afterglow: 0 = off; 0.5-0.9 leaves fading trails behind moving cells (one cheap pass per frame).\n"
+"afterglow = 0\n"
+"\n"
 "; Zoom: auto fits the view to the screen (1/8 for the whole machine); 8, 4, 2 or 1 fix\n"
 "; cells per pixel, centred on the digits (hpos/vpos still apply). 4 shows individual gliders.\n"
 "zoom = auto\n"
@@ -467,12 +501,26 @@ static int ini_changed(void) {
 }
 static void load_settings(void) { cfg_defaults(); load_ini(); apply_args(); clamp_settings(); }
 
+static void pick_monitor(int *mx, int *my, int *w, int *h) {
+  RECT mons[8]; int nm = 0; BOOL CALLBACK monproc(HMONITOR, HDC, LPRECT, LPARAM);
+  HMONITOR prim = MonitorFromPoint((POINT){ 0, 0 }, MONITOR_DEFAULTTOPRIMARY); MONITORINFO mi = { sizeof mi }; GetMonitorInfoA(prim, &mi); mons[nm++] = mi.rcMonitor;
+  EnumDisplayMonitors(NULL, NULL, monproc, (LPARAM)&(struct { RECT *r; int *n; HMONITOR prim; }){ mons, &nm, prim });
+  int idx = cfg.monitor; if (idx < 0 || idx >= nm) idx = 0;
+  *mx = mons[idx].left; *my = mons[idx].top; *w = mons[idx].right - mons[idx].left; *h = mons[idx].bottom - mons[idx].top;
+  logmsg("monitors: %d; using %d at (%d,%d) %dx%d", nm, idx, *mx, *my, *w, *h);
+}
 BOOL CALLBACK monproc(HMONITOR h, HDC dc, LPRECT r, LPARAM lp) { (void)dc; (void)r; struct { RECT *r; int *n; HMONITOR prim; } *ctx = (void *)lp; if (h == ctx->prim || *ctx->n >= 8) return TRUE; MONITORINFO mi = { sizeof mi }; GetMonitorInfoA(h, &mi); ctx->r[(*ctx->n)++] = mi.rcMonitor; return TRUE; }
 static volatile int quitRequested;
 static void pump(void) { MSG m; while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) { if (m.message == WM_QUIT) quitRequested = 1; TranslateMessage(&m); DispatchMessageA(&m); } }
 
 int main(int argc, char **argv) {
   g_argc = argc; g_argv = argv;
+  int scrCfg = 0, scrPreview = 0, scrRun = 0;
+  for (int i = 1; i < argc; i++) { // Windows screensaver conventions: /s run, /c configure, /p preview
+    const char *a = argv[i]; if ((a[0] == '/' || a[0] == '-') && (a[1] == 's' || a[1] == 'S') && (a[2] == 0 || a[2] == ':')) scrRun = 1;
+    if ((a[0] == '/' || a[0] == '-') && (a[1] == 'c' || a[1] == 'C') && (a[2] == 0 || a[2] == ':')) scrCfg = 1;
+    if ((a[0] == '/' || a[0] == '-') && (a[1] == 'p' || a[1] == 'P') && (a[2] == 0 || a[2] == ':')) scrPreview = 1; }
+  if (scrPreview) return 0;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--frame") && i + 1 < argc) cfg.frame = argv[i + 1];
     else if (!strcmp(argv[i], "--quit")) { int fs = 0; for (int j = 1; j < argc; j++) if (!strcmp(argv[j], "--fullscreen")) fs = 1;
@@ -489,6 +537,8 @@ int main(int argc, char **argv) {
   logfile = fopen(logPath, "a");
   snprintf(iniPath, sizeof iniPath, "%slife-clock.ini", exe);
   load_settings(); cfg.frame = frameArg; ini_changed();
+  if (scrCfg) { ShellExecuteA(NULL, "open", iniPath, NULL, exeDir, SW_SHOWNORMAL); return 0; }
+  if (scrRun) { cfg.fullscreen = 1; cfg.screensaver = 1; }
   logmsg("start: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d frame %s", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain, cfg.frame ? cfg.frame : "-");
 
   HANDLE mutex = NULL;
@@ -499,14 +549,7 @@ int main(int argc, char **argv) {
   typedef BOOL (WINAPI *SetCtx)(HANDLE); SetCtx setctx = (SetCtx)GetProcAddress(GetModuleHandleA("user32.dll"), "SetProcessDpiAwarenessContext");
   BOOL dpiok = setctx ? setctx((HANDLE)-4 /* PER_MONITOR_AWARE_V2 */) : SetProcessDPIAware();
   DWORD dpierr = GetLastError();
-  int W = GetSystemMetrics(SM_CXSCREEN), H = GetSystemMetrics(SM_CYSCREEN); int monX = 0, monY = 0;
-  { // monitor N: enumerate, primary first
-    RECT mons[8]; int nm = 0; BOOL CALLBACK monproc(HMONITOR, HDC, LPRECT, LPARAM);
-    HMONITOR prim = MonitorFromPoint((POINT){ 0, 0 }, MONITOR_DEFAULTTOPRIMARY); MONITORINFO mi = { sizeof mi }; GetMonitorInfoA(prim, &mi); mons[nm++] = mi.rcMonitor;
-    EnumDisplayMonitors(NULL, NULL, monproc, (LPARAM)&(struct { RECT *r; int *n; HMONITOR prim; }){ mons, &nm, prim });
-    int idx = cfg.monitor; if (idx < 0 || idx >= nm) idx = 0;
-    monX = mons[idx].left; monY = mons[idx].top; W = mons[idx].right - mons[idx].left; H = mons[idx].bottom - mons[idx].top;
-    logmsg("monitors: %d; using %d at (%d,%d) %dx%d", nm, idx, monX, monY, W, H); g_monX = monX; g_monY = monY; }
+  int W, H, monX, monY; pick_monitor(&monX, &monY, &W, &H); g_monX = monX; g_monY = monY;
   { DEVMODEA dm = { 0 }; dm.dmSize = sizeof dm; EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm);
     typedef UINT (WINAPI *GDFS)(void); GDFS gdfs = (GDFS)GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForSystem");
     logmsg("dpi: awareness call ok=%d err=%lu, metrics %dx%d, display mode %lux%lu, system dpi %u", dpiok, dpierr, W, H, dm.dmPelsWidth, dm.dmPelsHeight, gdfs ? gdfs() : 0); }
@@ -524,19 +567,16 @@ int main(int argc, char **argv) {
     { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; }
     int64_t target = target_generation(); while (target - uni.generation >= GPS) { int64_t step = target - uni.generation; if (step > PERIOD) step = PERIOD; hl_advance(&uni, step); target = target_generation(); }
     QueryPerformanceCounter(&t1); logmsg("synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
-    render(); GdiFlush(); write_bmp(cfg.frame); HlStats s = hl_stats(); logmsg("frame written: %s; nodes %d memo %u tables %.0f MB", cfg.frame, s.nodes, s.memo, s.bytes / 1e6); return 0;
+    render(); if (cfg.afterglow > 0) for (int i = 0; i < 8; i++) { hl_advance(&uni, 32); render(); } GdiFlush(); write_bmp(cfg.frame); HlStats s = hl_stats(); logmsg("frame written: %s; nodes %d memo %u tables %.0f MB", cfg.frame, s.nodes, s.memo, s.bytes / 1e6); return 0;
   }
 
   WNDCLASSA wc = { 0 }; wc.lpfnWndProc = wndproc; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "LifeClockWallpaper"; wc.hbrBackground = NULL; RegisterClassA(&wc);
   hwnd = cfg.fullscreen ? CreateWindowExA(0, wc.lpszClassName, "Life Clock", WS_POPUP, monX, monY, W, H, NULL, NULL, wc.hInstance, NULL)
                         : CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "Life Clock", WS_POPUP, monX, monY, W, H, NULL, NULL, wc.hInstance, NULL);
-  HDC sdc = GetDC(NULL); memdc = CreateCompatibleDC(sdc); ReleaseDC(NULL, sdc);
-  BITMAPINFO bi = { 0 }; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
-  dib = CreateDIBSection(memdc, &bi, DIB_RGB_COLORS, &dibBits, NULL, 0); SelectObject(memdc, dib);
-  free(pixels); pixels = (uint32_t *)dibBits; { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; }
+  create_dib(W, H);
   render();
   HWND trayWnd = NULL;
-  if (cfg.fullscreen) { SetWindowPos(hwnd, HWND_TOP, monX, monY, W, H, SWP_SHOWWINDOW); SetForegroundWindow(hwnd); SetFocus(hwnd); logmsg("fullscreen watch window (Esc/click closes, +/- zoom, arrows pan)"); }
+  if (cfg.fullscreen) { SetWindowPos(hwnd, cfg.screensaver ? HWND_TOPMOST : HWND_TOP, monX, monY, W, H, SWP_SHOWWINDOW); SetForegroundWindow(hwnd); SetFocus(hwnd); if (cfg.screensaver) ShowCursor(FALSE); logmsg(cfg.screensaver ? "screensaver window" : "fullscreen watch window (Esc/click closes, +/- zoom, arrows pan)"); }
   else { attach_to_desktop();
     WNDCLASSA tc = { 0 }; tc.lpfnWndProc = trayproc; tc.hInstance = wc.hInstance; tc.lpszClassName = "LifeClockTray"; RegisterClassA(&tc);
     trayWnd = CreateWindowExA(0, tc.lpszClassName, "", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, wc.hInstance, NULL); tray_add(trayWnd); }
@@ -552,6 +592,7 @@ int main(int argc, char **argv) {
   QueryPerformanceCounter(&t1); logmsg("synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
 
   int stepGens = GPS / cfg.fps; DWORD frameMs = 1000 / cfg.fps; int paused = 0; DWORD lastOccl = 0; int frames = 0; double workMs = 0; DWORD lastReport = GetTickCount(); int onBattery = 0; DWORD lastIni = 0;
+  int attachVerified = cfg.fullscreen, attachTry = 0; DWORD visibleSince = 0;
   for (;;) {
     DWORD r = MsgWaitForMultipleObjects(1, &quitEv, FALSE, paused ? 1000 : frameMs, QS_ALLINPUT);
     if (r == WAIT_OBJECT_0) break;
@@ -569,7 +610,19 @@ int main(int argc, char **argv) {
       int f = onBattery ? cfg.batteryFps : cfg.fps; stepGens = GPS / f; frameMs = 1000 / f; }
     if (now - lastOccl > 1000) { lastOccl = now;
       int p = paused_lock || paused_display || paused_manual || (!cfg.fullscreen && desktop_covered()); if (p != paused) { paused = p; if (paused) logmsg("paused (lock %d display-off %d; windows subtracted:%s)", paused_lock, paused_display, occl_dbg); else logmsg("resumed"); } }
-    if (paused) continue;
+    if (displayChanged) { displayChanged = 0; int mx, my, w, h; pick_monitor(&mx, &my, &w, &h);
+      if (mx != g_monX || my != g_monY || w != scrW || h != scrH) { logmsg("display changed: %dx%d at (%d,%d)", w, h, mx, my); g_monX = mx; g_monY = my; scrW = w; scrH = h;
+        create_dib(w, h); SetWindowPos(hwnd, NULL, mx, my, w, h, SWP_NOZORDER | SWP_NOACTIVATE); setup_view(w, h); render(); present(); } }
+    if (paused) { visibleSince = 0; continue; }
+    if (!visibleSince) visibleSince = now;
+    if (!attachVerified && now - visibleSince > 2500) { // the desktop has been visible for a while: is our picture on it?
+      if (screen_shows_us()) { attachVerified = 1; logmsg("attachment verified on screen (strategy %d)", cfg.attach); }
+      else { int next = -1; while (attachTry < (int)(sizeof ATTACH_ORDER / sizeof ATTACH_ORDER[0])) { int c = ATTACH_ORDER[attachTry++]; if (c != cfg.attach) { next = c; break; } }
+        if (next < 0) { attachVerified = 1; logmsg("no attachment strategy verified; staying with %d", cfg.attach); }
+        else { logmsg("not visible with strategy %d; trying %d", cfg.attach, next); cfg.attach = next;
+          DestroyWindow(hwnd); hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "LifeClockWallpaper", "Life Clock", WS_POPUP, g_monX, g_monY, scrW, scrH, NULL, NULL, GetModuleHandleA(NULL), NULL);
+          hostParent = NULL; attach_to_desktop(); dibPainted = 0; present(); visibleSince = now; continue; } }
+    }
     LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
     target = target_generation(); int64_t behind = target - uni.generation;
     if (behind < -PERIOD || behind > 30 * PERIOD) { logmsg("resync: behind %lld", (long long)behind); load_snapshot(current_minute()); continue; }

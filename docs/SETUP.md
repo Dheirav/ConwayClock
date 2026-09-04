@@ -27,6 +27,15 @@ life-clock.exe --quit
 
 Only one instance runs at a time; starting a second one exits immediately.
 
+## Screensaver
+
+The same program is a Windows screensaver. Copy `life-clock.exe` to
+`life-clock.scr` (the release has it ready), right-click the `.scr` and
+choose Install, or put it in `C:\Windows\System32` and pick it in
+Settings, Personalisation, Lock screen, Screen saver settings. It runs the
+watch view at 1/4 zoom and exits on mouse movement or a key. "Settings"
+in that dialog opens `life-clock.ini`.
+
 ## Tray icon
 
 While running, an amber clock icon sits in the notification area (it may be
@@ -74,6 +83,7 @@ on the command line as `--key value`, which overrides the file.
 | `gain` | 40 | Brightness of a single live cell in a zoomed-out pixel, 5 to 120 |
 | `pm` | dot | AM/PM. The machine has a box that is an outline in the morning and filled in the afternoon, next to a static "PM" label. `dot`: blank both, draw a filled dot beside the digits when the box says PM. `text`: keep the box, write AM or PM beside it. `machine`: show the corner as drawn. `hide`: blank it |
 | `colon` | pulse | The pattern's colon is two discs of still-life blocks. `pulse`: replace them with discs of pulsars so the dots breathe under Life's rules. `machine`: keep the blocks. `hide`: remove them |
+| `afterglow` | 0 | 0 is off; 0.5 to 0.9 leaves fading trails behind moving cells, one cheap pass per frame. Most useful at zoom 4 or closer |
 | `zoom` | auto | `auto` fits the view to the screen (1/8 for the whole machine). `8`, `4`, `2` or `1` fix the cells per pixel, centred on the digits with `hpos`/`vpos`; 4 shows individual gliders. Watch mode defaults to 4 |
 | `status` | 0 | Small line in the corner with generation, target and engine statistics |
 | `attach` | 7 | How the window is attached to the desktop; see troubleshooting |
@@ -103,13 +113,15 @@ drops to `battery_fps`.
 
 ## Troubleshooting
 
-**Nothing appears behind the icons.** Open `life-clock.log`. The lines
-`attach ...`, `synced ...` and `paused`/`resumed` say what it decided. If it
-attached but nothing shows, your Windows build may lay out the desktop
-differently; try `attach = 1` (child of Progman, the Windows 11 24H2
-layout), then `attach = 2` (child of the wallpaper WorkerW, the classic
-layout). The default `attach = 7` (inside the shell view) is what works on
-build 26200. Details in [How it works](HOW-IT-WORKS.md).
+**Nothing appears behind the icons.** The program checks for itself: a
+few seconds after the desktop is first visible it compares a patch of the
+screen with what it drew (`screen check ... N% of the patch matches` in
+`life-clock.log`) and, if the picture is not there, tries the other
+attachment strategies in turn (7 inside the shell view, 1 child of Progman,
+2 and 3 child of the wallpaper WorkerW, 5 bottom-most top-level window),
+logging each. If none verifies, look at the log's `attach` lines and the
+notes in [How it works](HOW-IT-WORKS.md); `attach = N` in the ini forces
+one.
 
 **It shows the wrong time.** The machine is synced to the local clock at
 start and resynced if it drifts more than a minute; a time-zone or clock
@@ -121,6 +133,9 @@ desktop, including a maximised window. Show the desktop.
 **The PM dot is wrong.** It is read from the machine's own indicator, which
 switches within ten minutes of noon and midnight. If it disagrees with the
 clock, the sync is off; see the log.
+
+**Resolution, scaling or monitor changed.** Handled: the window and
+bitmap are rebuilt at the new size within a frame.
 
 **Explorer restarted.** The window is recreated and re-attached
 automatically within a second.

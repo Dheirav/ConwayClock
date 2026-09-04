@@ -1,0 +1,50 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        run: |
+          curl -sL https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz | tar xJ
+          echo "$PWD/zig-x86_64-linux-0.14.1" >> "$GITHUB_PATH"
+
+      - name: Engine tests (Linux build of the engine against a naive simulator)
+        run: |
+          cd native && gcc -O2 -Wno-unused-result -o /tmp/test_hl test_hl.c hashlife.c && /tmp/test_hl ref ../clock.rle
+
+      - name: Pack snapshots
+        run: python3 tools/gen-snapshot-data.py
+
+      - name: Build Windows executable
+        run: |
+          cd native && zig cc -target x86_64-windows-gnu -O2 -o life-clock.exe \
+            main.c hashlife.c inflate.c colon.c snapshots_data.c \
+            -lgdi32 -luser32 -ldwmapi -lwtsapi32 -lshell32 -Wl,--subsystem,windows
+          cp life-clock.exe life-clock.scr
+          ls -la life-clock.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: life-clock
+          path: |
+            native/life-clock.exe
+            native/life-clock.scr
+            native/life-clock.sample.ini
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" native/life-clock.exe native/life-clock.scr native/life-clock.sample.ini \
+            --title "${GITHUB_REF_NAME}" --notes "Built by CI from ${GITHUB_SHA}. See docs/SETUP.md." || \
+          gh release upload "${GITHUB_REF_NAME}" native/life-clock.exe native/life-clock.scr native/life-clock.sample.ini --clobber

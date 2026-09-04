@@ -62,7 +62,12 @@ bottom of its children, beneath the icon list. DefView is a layered window
 whose surface is composed with per-pixel alpha, so the pixels must carry
 opaque alpha or the blend turns additive. `attach = N` selects the other
 strategies for other builds, and a watchdog recreates and re-attaches the
-window if Explorer restarts.
+window if Explorer restarts. The program also verifies itself: once the
+desktop has been visible for a few seconds it captures a patch of the
+screen at the digits' centre and compares it with its own bitmap; if fewer
+than 70 % of the pixels match it moves to the next strategy, so a future
+Windows build that changes the layout again degrades to a logged fallback
+rather than a blank desktop.
 
 ## Pausing
 
