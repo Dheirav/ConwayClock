@@ -25,6 +25,7 @@
 #include <math.h>
 #include "hashlife.h"
 #include "inflate.h"
+#include "colon.h"
 
 extern const int SNAP_COUNT; extern const int SNAP_MINUTE[]; extern const size_t SNAP_OFF[]; extern const unsigned char SNAP_DATA[];
 
@@ -35,11 +36,18 @@ extern const int SNAP_COUNT; extern const int SNAP_MINUTE[]; extern const size_t
 #define PAT_H 6796
 static const struct { int x, y, w, h; } DISPLAY = { 1900, 3950, 8000, 2850 };
 
-static struct { int fps, batteryFps, view, gain, status, attach, monitor, pmMode; double vpos, hpos, size; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; } cfg;
-static void cfg_defaults(void) { memset(&cfg, 0, sizeof cfg); cfg.pmMode = 2; cfg.fps = 6; cfg.batteryFps = 3; cfg.gain = 40; cfg.attach = 7; cfg.vpos = 0.5; cfg.hpos = 0.5; cfg.size = 1.0; cfg.bg = 0x0f0907; cfg.cells = 0xa8e9ff; strcpy(cfg.palette, "amber"); }
+static struct { int fps, batteryFps, view, gain, status, attach, monitor, pmMode, colonMode; double vpos, hpos, size; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; } cfg;
+static void cfg_defaults(void) { memset(&cfg, 0, sizeof cfg); cfg.pmMode = 3; cfg.colonMode = 1; cfg.fps = 6; cfg.batteryFps = 3; cfg.gain = 40; cfg.attach = 7; cfg.vpos = 0.5; cfg.hpos = 0.5; cfg.size = 1.0; cfg.bg = 0x0f0907; cfg.cells = 0xa8e9ff; strcpy(cfg.palette, "amber"); }
 static int g_argc; static char **g_argv; static char iniPath[MAX_PATH]; static FILETIME iniTime;
-static FILE *logfile;
-static void logmsg(const char *fmt, ...) { if (!logfile) return; SYSTEMTIME t; GetLocalTime(&t); fprintf(logfile, "%02d:%02d:%02d ", t.wHour, t.wMinute, t.wSecond); va_list a; va_start(a, fmt); vfprintf(logfile, fmt, a); va_end(a); fputc('\n', logfile); fflush(logfile); }
+static FILE *logfile; static char logPath[MAX_PATH]; static int logDay = -1;
+// One log per day: at the first message of a new day the current log becomes
+// life-clock.prev.log (replacing the old one), so at most two days are kept.
+static void log_rotate_if_needed(const SYSTEMTIME *t) {
+  if (logDay == t->wDay) return;
+  if (logDay != -1 && logfile) { fclose(logfile); char prev[MAX_PATH]; snprintf(prev, sizeof prev, "%.*sprev.log", (int)(strlen(logPath) - 3), logPath); MoveFileExA(logPath, prev, MOVEFILE_REPLACE_EXISTING); logfile = fopen(logPath, "a"); }
+  logDay = t->wDay;
+}
+static void logmsg(const char *fmt, ...) { if (!logfile) return; SYSTEMTIME t; GetLocalTime(&t); log_rotate_if_needed(&t); fprintf(logfile, "%02d:%02d:%02d ", t.wHour, t.wMinute, t.wSecond); va_list a; va_start(a, fmt); vfprintf(logfile, fmt, a); va_end(a); fputc('\n', logfile); fflush(logfile); }
 
 // ---- time model -------------------------------------------------------------
 // The machine's cycle is 24 hours: generation 0 shows 12:00 with the PM
@@ -59,6 +67,7 @@ static int load_snapshot(int minute) {
   size_t len; uint8_t *text = gunzip(SNAP_DATA + SNAP_OFF[best], SNAP_OFF[best + 1] - SNAP_OFF[best], &len);
   if (!text) { logmsg("snapshot %d: gunzip failed", best); return 0; }
   int32_t n; Cell *cells = hl_parse_rle((const char *)text, 1, &n); free(text);
+  cells = colon_apply(cells, &n, cfg.colonMode);
   hl_from_cells(&uni, cells, n); free(cells);
   uni.generation = (int64_t)SNAP_MINUTE[best] * PERIOD;
   logmsg("loaded snapshot minute %d (%d cells) for minute %d", SNAP_MINUTE[best], n, minute);
@@ -121,8 +130,8 @@ static void render(void) {
   // (x 700..1450). pm=text keeps the box, blanks the label, and writes AM or PM from
   // the box's own state; pm=hide blanks both.
   if (cfg.pmMode) {
-    int lx0 = ((cfg.pmMode == 1 ? 0 : 700) - view.x) >> view.z, lx1 = (1450 - view.x) >> view.z, ly0 = (4000 - view.y) >> view.z, ly1 = (4850 - view.y) >> view.z;
-    if (cfg.pmMode == 2) { long sum = 0; int bx0 = (100 - view.x) >> view.z, bx1 = (680 - view.x) >> view.z, by0 = (4150 - view.y) >> view.z, by1 = (4750 - view.y) >> view.z;
+    int lx0 = ((cfg.pmMode == 2 ? 700 : 0) - view.x) >> view.z, lx1 = (1450 - view.x) >> view.z, ly0 = (4000 - view.y) >> view.z, ly1 = (4850 - view.y) >> view.z;
+    if (cfg.pmMode >= 2) { long sum = 0; int bx0 = (100 - view.x) >> view.z, bx1 = (680 - view.x) >> view.z, by0 = (4150 - view.y) >> view.z, by1 = (4750 - view.y) >> view.z;
       for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) if (y >= 0 && y < view.ph && x >= 0 && x < view.pw) sum += dens[(size_t)y * view.pw + x];
       pmLit = sum > 7400; }   // measured in this region: outline 4,890 cells, filled 9,956
     if (lx0 < 0) lx0 = 0; if (ly0 < 0) ly0 = 0; if (lx1 > view.pw) lx1 = view.pw; if (ly1 > view.ph) ly1 = view.ph;
@@ -141,6 +150,13 @@ static void render(void) {
     for (int x = x0; x < x1; x++) out[x] = lut[(a0[x] * gy + a1[x] * fy) >> 8];
   }
   tResample += qnow() - b;
+  if (cfg.pmMode == 3 && memdc && pixels == (uint32_t *)dibBits && pmLit) {
+    // PM: a filled dot to the left of the hour digits at their mid-height (pattern ~(1500, 5375)); AM: nothing.
+    double sc = (double)dstW / view.pw;
+    int cx = dstX + (int)(((1500 - view.x) >> view.z) * sc), cy = dstY + (int)(((5375 - view.y) >> view.z) * sc), rr = (int)(((240 >> view.z) * sc) / 2); if (rr < 4) rr = 4;
+    HBRUSH br = CreateSolidBrush(RGB(cfg.cells & 255, (cfg.cells >> 8) & 255, (cfg.cells >> 16) & 255)); HGDIOBJ ob = SelectObject(memdc, br), op = SelectObject(memdc, GetStockObject(NULL_PEN));
+    GdiFlush(); Ellipse(memdc, cx - rr, cy - rr, cx + rr, cy + rr); SelectObject(memdc, ob); SelectObject(memdc, op); DeleteObject(br);
+  }
   if (cfg.pmMode == 2 && memdc && pixels == (uint32_t *)dibBits) {
     // Label position: the machine's own label area, in screen pixels.
     double sc = (double)dstW / view.pw;
@@ -291,7 +307,8 @@ static void apply_setting(const char *key, const char *val) {
   else if (!strcmp(key, "monitor")) cfg.monitor = atoi(val);
   else if (!strcmp(key, "status")) cfg.status = atoi(val) || !strcmp(val, "on") || !strcmp(val, "true");
   else if (!strcmp(key, "attach")) cfg.attach = atoi(val);
-  else if (!strcmp(key, "pm")) cfg.pmMode = !strcmp(val, "hide") ? 1 : !strcmp(val, "machine") ? 0 : 2; // 2 = text (default)
+  else if (!strcmp(key, "pm")) cfg.pmMode = !strcmp(val, "hide") ? 1 : !strcmp(val, "machine") ? 0 : !strcmp(val, "text") ? 2 : 3; // 3 = dot (default)
+  else if (!strcmp(key, "colon")) cfg.colonMode = !strcmp(val, "machine") ? 0 : !strcmp(val, "hide") ? 2 : 1; // 1 = pulse (default)
   else if (!strcmp(key, "palette")) { strncpy(cfg.palette, val, 15); for (size_t i = 0; i < sizeof PRESETS / sizeof PRESETS[0]; i++) if (!strcmp(val, PRESETS[i][0])) { cfg.bg = parse_hex_bgr(PRESETS[i][1]); cfg.cells = parse_hex_bgr(PRESETS[i][2]); cfg.hasCells2 = 0; } }
   else if (!strcmp(key, "bg")) cfg.bg = parse_hex_bgr(val);
   else if (!strcmp(key, "cells")) cfg.cells = parse_hex_bgr(val);
@@ -334,9 +351,12 @@ static const char *INI_TEMPLATE =
 "gain = 40\n"
 "\n"
 "; AM/PM: the machine has a box that is an outline in the morning and filled in the afternoon,\n"
-"; next to a static 'PM' label. text = keep the box and write AM or PM from its state (default),\n"
-"; machine = show exactly as drawn, hide = blank that corner.\n"
-"pm = text\n"
+"; next to a static 'PM' label. dot = a filled dot beside the digits when PM, nothing when AM,\n"
+"; read from that box (default); text = keep the box and write AM/PM; machine = as drawn; hide.\n"
+"pm = dot\n"
+"; The colon: pulse = the pattern's still-life discs replaced by discs of pulsars (period-3\n"
+"; oscillators) so the dots breathe under Life's rules (default); machine = as drawn; hide.\n"
+"colon = pulse\n"
 "\n"
 "; Small stats line in the corner: 0 or 1.\n"
 "status = 0\n";
@@ -375,7 +395,13 @@ int main(int argc, char **argv) {
   }
   const char *frameArg = cfg.frame;
   char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH); char *slash = strrchr(exe, '\\'); if (slash) slash[1] = 0;
-  char logpath[MAX_PATH]; snprintf(logpath, sizeof logpath, "%slife-clock.log", exe); logfile = fopen(logpath, "a");
+  snprintf(logPath, sizeof logPath, "%slife-clock.log", exe);
+  { // at startup, a log last written on an earlier day is rotated away first
+    WIN32_FILE_ATTRIBUTE_DATA a; SYSTEMTIME lw, now; GetLocalTime(&now);
+    if (GetFileAttributesExA(logPath, GetFileExInfoStandard, &a)) { FILETIME lt; FileTimeToLocalFileTime(&a.ftLastWriteTime, &lt); FileTimeToSystemTime(&lt, &lw);
+      if (lw.wDay != now.wDay || lw.wMonth != now.wMonth || lw.wYear != now.wYear) { char prev[MAX_PATH]; snprintf(prev, sizeof prev, "%slife-clock.prev.log", exe); MoveFileExA(logPath, prev, MOVEFILE_REPLACE_EXISTING); } }
+    logDay = now.wDay; }
+  logfile = fopen(logPath, "a");
   snprintf(iniPath, sizeof iniPath, "%slife-clock.ini", exe);
   load_settings(); cfg.frame = frameArg; ini_changed();
   logmsg("start: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d frame %s", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain, cfg.frame ? cfg.frame : "-");
@@ -446,7 +472,7 @@ int main(int argc, char **argv) {
       hostParent = NULL; attach_to_desktop(); present(); lastOccl = now; continue;
     }
     if (now - lastIni > 2000) { lastIni = now;
-      if (ini_changed()) { load_settings(); build_palette(); setup_view(scrW, scrH); dibPainted = 0; render(); present(); logmsg("settings reloaded: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain); }
+      if (ini_changed()) { int oldColon = cfg.colonMode; load_settings(); build_palette(); setup_view(scrW, scrH); dibPainted = 0; if (cfg.colonMode != oldColon) load_snapshot(current_minute()); render(); present(); logmsg("settings reloaded: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain); }
       SYSTEM_POWER_STATUS ps; GetSystemPowerStatus(&ps); onBattery = (ps.ACLineStatus == 0);
       int f = onBattery ? cfg.batteryFps : cfg.fps; stepGens = GPS / f; frameMs = 1000 / f; }
     if (now - lastOccl > 1000) { lastOccl = now;

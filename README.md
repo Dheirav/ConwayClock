@@ -32,8 +32,9 @@ cycle) so it can start near the current minute instead of simulating hours.
 
 ### Settings: `life-clock.ini`
 
-Created next to the executable on first run, with comments. Edit and save;
-the wallpaper reloads it within 2 seconds, no restart. None of these cost
+Created next to the executable on first run, with comments (a copy is in
+`native/life-clock.sample.ini`). Edit and save; the wallpaper reloads it
+within 2 seconds, no restart. None of these cost
 anything while running: colours and layout are applied once per change.
 
 | Key | Default | Meaning |
@@ -48,12 +49,17 @@ anything while running: colours and layout are applied once per change.
 | `bg`, `cells` | | Background and cell colour, RRGGBB; override the palette |
 | `cells2` | none | If set, a two-tone ramp: the densest areas fade from `cells` to this colour |
 | `gain` | 40 | Brightness of one live cell in a zoomed-out pixel, 5-120 |
-| `pm` | text | The machine has an AM/PM box (outline in the morning, filled in the afternoon) next to a static "PM" label. `text` keeps the box, blanks the label and writes AM or PM from the box's own state; `machine` shows it exactly as drawn; `hide` blanks the corner |
+| `pm` | dot | The machine has an AM/PM box (outline in the morning, filled in the afternoon) next to a static "PM" label. `dot` blanks both and draws a filled dot beside the digits when the box says PM, nothing for AM; `text` keeps the box and writes AM/PM; `machine` shows the corner as drawn; `hide` blanks it |
+| `colon` | pulse | The pattern's colon is two discs of still-life blocks that render flat. `pulse` replaces them, at load, with discs of pulsars (period-3 oscillators) so the dots breathe under Life's rules; `machine` keeps the blocks; `hide` removes them. Measured cost: none (0.69 vs 0.72 ms per frame, fewer cells) |
 | `status` | 0 | Small stats line in the corner |
 
 The same names work as command-line flags (`--fps 3`, `--palette green`)
 and override the file. `--frame out.bmp` renders one frame headlessly and
 exits, for checking a setting.
+
+The program writes `life-clock.log` next to itself and rotates it daily: at
+the first entry of a new day it becomes `life-clock.prev.log`, replacing the
+old one, so at most two days (a few hundred KB) are ever kept.
 
 ### What it costs
 
