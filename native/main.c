@@ -39,7 +39,13 @@ extern const int SNAP_COUNT; extern const int SNAP_MINUTE[]; extern const size_t
 
 #define PERIOD 11520
 #define GPS 192
-#define DISPLAY_LAG 11450   // see index.html: never-early display
+// How far ahead of its own counter the machine is run. Measured (see
+// native/test_clock.c): the display for a minute settles between +14,208 and
+// +18,816 generations and starts changing again between +19,328 and +22,912,
+// so a lag between 11,392 and 14,210 shows the current minute for as much of
+// it as the machine allows, and never settles on a stale or early one. 12,800
+// is the centre of that range.
+#define DISPLAY_LAG 12800
 #define PAT_W 10016
 #define PAT_H 6796
 static const struct { int x, y, w, h; } DISPLAY = { 1900, 3950, 8000, 2850 };

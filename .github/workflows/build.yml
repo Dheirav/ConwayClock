@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # release notes need the tag history
 
       - name: Install Zig
         run: |
@@ -26,6 +28,10 @@ jobs:
 
       - name: Pack snapshots
         run: python3 tools/gen-snapshot-data.py
+
+      - name: Clock test (does it show the right time?)
+        run: |
+          cd native && gcc -O2 -w -o /tmp/test_clock test_clock.c hashlife.c inflate.c snapshots_data.c && /tmp/test_clock
 
       - name: Build Windows executable
         run: |
@@ -48,6 +54,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" native/life-clock.exe native/life-clock.scr native/life-clock.sample.ini \
-            --title "${GITHUB_REF_NAME}" --notes "Built by CI from ${GITHUB_SHA}. See docs/SETUP.md." || \
-          gh release upload "${GITHUB_REF_NAME}" native/life-clock.exe native/life-clock.scr native/life-clock.sample.ini --clobber
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          ( cd native && sha256sum life-clock.exe life-clock.scr life-clock.sample.ini ) > SHA256SUMS.txt
+          tools/release-notes.sh "$TAG" SHA256SUMS.txt > notes.md
+          TITLE="$(git tag -l --format='%(contents:subject)' "$TAG")"
+          [ -n "$TITLE" ] || TITLE="$TAG"
+          FILES="native/life-clock.exe native/life-clock.scr native/life-clock.sample.ini SHA256SUMS.txt"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TITLE" --notes-file notes.md
+            gh release upload "$TAG" $FILES --clobber
+          else
+            gh release create "$TAG" $FILES --title "$TITLE" --notes-file notes.md
+          fi

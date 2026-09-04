@@ -128,13 +128,18 @@ applied once per change.
 This is how the machine behaves, not a defect. After its counter ticks, a
 segment switching on fills with gliders within a few hundred generations,
 but a segment switching off keeps the gliders already travelling along it
-until they drain out, up to about a minute of machine time. So each digit
-change begins 40 to 60 seconds into the real minute and finishes 0 to 37
-seconds into the next, and a digit can briefly read as something else on
-the way (a 1 becoming a 2 passes through a 7). The program runs the machine
-11,450 generations ahead of its counter so the display is never early:
-stable digits are always the current minute or, during a redraw, the
-previous one.
+until they drain out. Measured across the cycle, the digits for a minute
+settle between 1.23 and 1.63 minutes after that minute's own generation and
+begin changing again between 1.68 and 1.99 minutes, so the machine spends
+roughly a third of every minute redrawing, and a digit can briefly read as
+something else on the way (a 1 becoming a 2 passes through a 7).
+
+The program runs the machine 12,800 generations ahead of its counter, the
+centre of the range that shows the current minute for as much of it as the
+machine allows while never settling on a stale or early one. In practice
+the right time is on screen for 20 to 45 seconds of each minute, least
+around an hour rollover, and the rest of the minute is visibly a redraw.
+`native/test_clock.c` checks this on every push.
 
 ## Pausing
 

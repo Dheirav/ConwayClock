@@ -38,9 +38,13 @@ JavaScript engine that generated the snapshots.
 ## Wall-clock sync
 
 Minute M of the machine's cycle is M minutes after noon. The target
-generation is M x 11,520 + 11,450 + seconds x 192. The 11,450 is the
-measured time the display takes to settle after its counter ticks, chosen
-so the display is never early.
+generation is M x 11,520 + 12,800 + seconds x 192. The 12,800 comes from
+measuring, for a sample of minutes across the cycle, the generation range
+in which the display reads that minute exactly: it settles between +14,208
+and +18,816 and starts changing again between +19,328 and +22,912. A lag
+between 11,392 and 14,210 therefore covers every one of those windows
+without ever settling on the previous or the next minute, and 12,800 is
+its centre.
 
 144 precomputed states, one per 10 minutes of the cycle, are embedded in
 the executable (`native/snapshots_data.c`, generated from
@@ -136,5 +140,13 @@ shows progress with an ETA from the measured rate. `tools/hashlife.js` is
 the JavaScript engine those tools use and `tools/reader.js` reads the
 7-segment display from a universe, for tests.
 
-The Linux-side tests: `gcc -O2 -o test_hl native/test_hl.c native/hashlife.c`
-runs the naive comparison, the population trace and the timings.
+The Linux-side tests, both run by CI on every push:
+
+- `native/test_hl.c` checks the engine against a naive simulator, prints the
+  population trace that must match the JavaScript engine, and times it.
+- `native/test_clock.c` is the end-to-end one: for a sample of minutes across
+  the 24-hour cycle it loads the embedded snapshot, advances to the
+  generation the wallpaper would use, reads the seven-segment display back
+  off the grid and compares it with the clock, including AM/PM. It fails if
+  the sync is a minute out or if the cycle is read as 12 hours instead of 24,
+  which is the bug that shipped in an early version.
