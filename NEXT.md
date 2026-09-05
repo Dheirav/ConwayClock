@@ -124,8 +124,12 @@ Steps 1 and 2 are implemented on `main`; step 3 needs a Windows machine.
   resample lands at 37 % of its former cost, against 33 % predicted; the span
   bookkeeping costs about 0.11 ms of render. With the blit unchanged at
   0.9-1.0 ms a frame goes from ~5.0 ms to ~3.0 ms, so frame work at 6 fps
-  drops from ~30 ms/s to ~18 ms/s. The process CPU figure in
-  `docs/HOW-IT-WORKS.md` has not been re-measured over a long run.
+  drops from ~30 ms/s to ~18 ms/s.
+- **Confirmed in production 2026-09-06.** Both builds run as the wallpaper on
+  the same machine at `fps = 12`: resample 3.2-3.7 ms falls to 1.2 ms, and
+  CPU at a full frame count falls from 7.3-9.2 % to 6.4-6.5 % of one core.
+  Compare only minutes with ~640 frames; a minute following a pause is
+  dominated by the engine catching up, not by drawing.
 - **At `zoom = 4` it buys nothing**: 2.31 ms against 2.40 ms. The watch view
   is a dense crop with little empty space. Expected, and the right way round.
 - **Exact intervals were tried and reverted, 2026-09-05.** One interval per

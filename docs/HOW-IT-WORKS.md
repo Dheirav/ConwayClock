@@ -131,7 +131,20 @@ The saving is a property of the zoomed-out view, where most of the map is
 empty. At `zoom = 4`, the watch view, the same measurement gives 2.31 ms
 against 2.40 ms: the crop is dense, there is little empty space to skip, and
 the partial repaint is worth nothing. That is the right way round, since the
-wallpaper is what runs all day. The palette actually drawn eases toward
+wallpaper is what runs all day.
+
+Confirmed in ordinary use rather than on a bench, by running both builds as
+the wallpaper on the same machine at `fps = 12` and reading the per-minute
+log line:
+
+| | frames in the minute | CPU, one core | resample |
+|---|---|---|---|
+| before | 626 to 636 | 7.3 to 9.2 % | 3.2 to 3.7 ms |
+| after | 640 to 643 | **6.4 to 6.5 %** | **1.2 ms** |
+
+Minutes that follow a long pause cost more than this in total while the
+machine catches up -- the engine, not the drawing -- so compare only minutes
+with a full frame count. The palette actually drawn eases toward
 the configured one, so a day/night switch fades over `fade` seconds instead
 of jumping. Optional passes on the density map: afterglow (a decaying maximum per pixel) and highlight (a
 decaying record of how much each pixel changed, selecting a second
