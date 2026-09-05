@@ -6,6 +6,9 @@ typedef struct { int64_t x, y; } Cell;
 typedef struct { int32_t root; int64_t x0, y0; int64_t generation; } Universe;
 typedef struct { int32_t before, after; uint32_t memo; } HlGcResult;
 typedef struct { int32_t nodes, cap; uint32_t memo, tiles; size_t bytes; } HlStats;
+// The half-open range of map columns holding live content on one map row.
+// lo >= hi means the row is empty. See hl_density_spans.
+typedef struct { int32_t lo, hi; } HlSpan;
 void hl_init(void);
 void hl_from_cells(Universe *u, Cell *cells, int32_t n);
 void hl_advance(Universe *u, int64_t gens);
@@ -15,6 +18,11 @@ int32_t hl_population(const Universe *u);
 void hl_bitmap(const Universe *u, int64_t x, int64_t y, int w, int h, uint8_t *out);
 void hl_density(const Universe *u, int64_t x, int64_t y, int w, int h, int z, uint8_t *out);
 void hl_density_cached(const Universe *u, int64_t x, int64_t y, int w, int h, int z, uint8_t *out);
+// As hl_density_cached, but also reports which columns of each map row were
+// touched (`rows` must hold h entries), and does NOT clear `out` first: with
+// spans in hand the caller need only clear the previous frame's ranges, which
+// is the point of the call. Rows the descent never reaches are left as { w, 0 }.
+void hl_density_spans(const Universe *u, int64_t x, int64_t y, int w, int h, int z, uint8_t *out, HlSpan *rows);
 HlGcResult hl_gc(Universe *u);
 HlStats hl_stats(void);
 Cell *hl_parse_rle(const char *text, int use_pos, int32_t *count);

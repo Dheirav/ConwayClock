@@ -140,7 +140,7 @@ void hl_advance(Universe *u, int64_t gens) {
   u_trim(u);
 }
 
-typedef struct { uint8_t *out; int64_t x, y; int w, h; int z; } Rect;
+typedef struct { uint8_t *out; int64_t x, y; int w, h; int z; HlSpan *rows; } Rect;
 static void bitmap_rec(const Rect *r, int32_t n, int64_t nx, int64_t ny) {
   if (POP(n) == 0) return;
   int64_t s = (int64_t)1 << LEVEL(n);
@@ -184,6 +184,10 @@ static void cached_rec(const Rect *r, int32_t n, int64_t nx, int64_t ny) {
     // otherwise force reloads of w/h in the loop.
     const uint8_t *t = tile_for(n, r->z); const int w = r->w, h = r->h; uint8_t *out = r->out;
     int64_t px = (nx - r->x) >> r->z, py = (ny - r->y) >> r->z;
+    if (r->rows) { // the tile's columns, clipped, recorded against each of its 8 rows
+      int32_t lo = px < 0 ? 0 : (int32_t)px, hi = px + 8 > w ? w : (int32_t)(px + 8);
+      if (lo < hi) for (int ty = 0; ty < 8; ty++) { int64_t oy = py + ty; if (oy < 0 || oy >= h) continue;
+        HlSpan *sp = &r->rows[oy]; if (lo < sp->lo) sp->lo = lo; if (hi > sp->hi) sp->hi = hi; } }
     if (px >= 0 && py >= 0 && px + 8 <= w && py + 8 <= h) { for (int ty = 0; ty < 8; ty++) memcpy(out + (py + ty) * w + px, t + ty * 8, 8); return; }
     for (int ty = 0; ty < 8; ty++) { int64_t oy = py + ty; if (oy < 0 || oy >= h) continue;
       for (int tx = 0; tx < 8; tx++) { int64_t ox = px + tx; if (ox >= 0 && ox < w) out[oy * w + ox] = t[ty * 8 + tx]; } }
@@ -194,6 +198,10 @@ static void cached_rec(const Rect *r, int32_t n, int64_t nx, int64_t ny) {
 }
 void hl_density_cached(const Universe *u, int64_t x, int64_t y, int w, int h, int z, uint8_t *out) {
   memset(out, 0, (size_t)w * h); Rect r = { out, x, y, w, h, z }; cached_rec(&r, u->root, u->x0, u->y0);
+}
+void hl_density_spans(const Universe *u, int64_t x, int64_t y, int w, int h, int z, uint8_t *out, HlSpan *rows) {
+  for (int i = 0; i < h; i++) { rows[i].lo = w; rows[i].hi = 0; }
+  Rect r = { out, x, y, w, h, z, rows }; cached_rec(&r, u->root, u->x0, u->y0);
 }
 
 // Compaction: keep nodes reachable from the root plus memo entries whose key

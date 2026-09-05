@@ -103,6 +103,16 @@ static double dispBg[3], dispCells[3], dispGain; static DWORD tgtBg, tgtCells; s
 static void unpack3(DWORD c, double o[3]) { o[0] = c & 255; o[1] = (c >> 8) & 255; o[2] = (c >> 16) & 255; }
 static DWORD pack3(const double c[3]) { return ((DWORD)(c[2] + 0.5) << 16) | ((DWORD)(c[1] + 0.5) << 8) | (DWORD)(c[0] + 0.5); }
 static int dstX, dstY, dstW, dstH;   // where the view lands on screen (letterboxed)
+// Partial repaint. The density map is mostly empty (measured: ~13 % of tiles
+// hold anything), but the resample used to walk the whole rectangle. The engine
+// now reports, per map row, the columns it touched; the two resample passes run
+// over the union of this frame's and last frame's spans and leave the rest of
+// the picture standing. Anything that invalidates untouched pixels -- a palette
+// ease, a pan, a resize -- must set fullRepaint.
+static HlSpan *rowSpan, *prevRowSpan;
+static int *invX;        // invX[k] = first output column that reads map column k
+static int *oLo, *oHi;   // per map row, the output columns needing recompute
+static int fullRepaint = 1;
 static int *mapX, *mapY, *fracX, *fracY; static uint8_t *hrows; // per source row, horizontally resampled to dstW
 
 static uint32_t mix(DWORD a, DWORD b, double t) { // both BGR-packed; result BGRA opaque
@@ -121,6 +131,27 @@ static DWORD disp_cells(void) { return pack3(dispCells); }
 static int unitScale; // 1 when one map pixel is one screen pixel (no resample needed)
 static uint8_t *glow;  // afterglow buffer, same size as the density map
 static uint8_t *prevDens, *chg; // last frame's density and a decaying change map, for highlight
+// Called at the end of each setup_view branch, once mapX/dstW/view are settled.
+static void build_span_tables(void) {
+  free(rowSpan); free(prevRowSpan); free(oLo); free(oHi); free(invX);
+  rowSpan = malloc(sizeof(HlSpan) * view.ph); prevRowSpan = malloc(sizeof(HlSpan) * view.ph);
+  oLo = malloc(sizeof(int) * view.ph); oHi = malloc(sizeof(int) * view.ph);
+  for (int y = 0; y < view.ph; y++) { rowSpan[y].lo = prevRowSpan[y].lo = view.pw; rowSpan[y].hi = prevRowSpan[y].hi = 0; }
+  invX = malloc(sizeof(int) * (view.pw + 2));
+  for (int k = 0; k <= view.pw + 1; k++) invX[k] = dstW;
+  for (int x = dstW - 1; x >= 0; x--) invX[mapX[x]] = x;
+  for (int k = view.pw; k >= 0; k--) if (invX[k] > invX[k + 1]) invX[k] = invX[k + 1];
+  fullRepaint = 1;
+}
+// Widen this frame's spans over a rectangle given in pattern coordinates, for
+// the overlays that are drawn on top of the map and so are not in its spans.
+static void force_span(int px0, int py0, int px1, int py1) {
+  int x0 = (px0 - view.x) >> view.z, x1 = ((px1 - view.x) >> view.z) + 1;
+  int y0 = (py0 - view.y) >> view.z, y1 = ((py1 - view.y) >> view.z) + 1;
+  if (x0 < 0) x0 = 0; if (x1 > view.pw) x1 = view.pw;
+  if (y0 < 0) y0 = 0; if (y1 > view.ph) y1 = view.ph;
+  for (int y = y0; y < y1; y++) { if (x0 < rowSpan[y].lo) rowSpan[y].lo = x0; if (x1 > rowSpan[y].hi) rowSpan[y].hi = x1; }
+}
 static void setup_view(int W, int H) {
   scrW = W; scrH = H;
   int rx, ry, rw, rh;
@@ -133,9 +164,10 @@ static void setup_view(int W, int H) {
     if (!dibBits || pixels != (uint32_t *)dibBits) { free(pixels); pixels = calloc((size_t)W * H, 4); } else { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; } dibPainted = 0;
     dstW = (int)(view.pw * cfg.size); dstH = (int)(view.ph * cfg.size); dstX = 0; dstY = 0; unitScale = (cfg.size == 1.0);
     free(mapX); free(mapY); free(fracX); free(fracY); free(hrows);
-    mapX = malloc(sizeof(int) * dstW); fracX = malloc(sizeof(int) * dstW); mapY = malloc(sizeof(int) * dstH); fracY = malloc(sizeof(int) * dstH); hrows = malloc((size_t)view.ph * dstW);
+    mapX = malloc(sizeof(int) * dstW); fracX = malloc(sizeof(int) * dstW); mapY = malloc(sizeof(int) * dstH); fracY = malloc(sizeof(int) * dstH); hrows = calloc((size_t)view.ph * dstW, 1);
     for (int i = 0; i < dstW; i++) { double sv = (i + 0.5) / cfg.size - 0.5; if (sv < 0) sv = 0; int k = (int)sv; if (k > view.pw - 2) k = view.pw - 2; mapX[i] = k; fracX[i] = (int)((sv - k) * 256); }
     for (int i = 0; i < dstH; i++) { double sv = (i + 0.5) / cfg.size - 0.5; if (sv < 0) sv = 0; int k = (int)sv; if (k > view.ph - 2) k = view.ph - 2; mapY[i] = k; fracY[i] = (int)((sv - k) * 256); }
+    build_span_tables();
     logmsg("view: zoom 1/%d, %dx%d cells from (%d,%d) -> %dx%d map -> %dx%d on %dx%d", 1 << z, view.w, view.h, view.x, view.y, view.pw, view.ph, dstW, dstH, W, H);
     return;
   }
@@ -156,10 +188,11 @@ static void setup_view(int W, int H) {
   dstW = (int)(view.pw * scale); dstH = (int)(view.ph * scale);
   // The display's centre is at the middle of the view horizontally and at vpos of it vertically.
   dstX = (int)(cfg.hpos * W - dstW / 2.0); dstY = (int)(cfg.vpos * H - cfg.vpos * dstH);
-  free(mapX); free(mapY); free(fracX); free(fracY); free(hrows); hrows = malloc((size_t)view.ph * dstW);
+  free(mapX); free(mapY); free(fracX); free(fracY); free(hrows); hrows = calloc((size_t)view.ph * dstW, 1);
   mapX = malloc(sizeof(int) * dstW); fracX = malloc(sizeof(int) * dstW); mapY = malloc(sizeof(int) * dstH); fracY = malloc(sizeof(int) * dstH);
   for (int i = 0; i < dstW; i++) { double s = (i + 0.5) / scale - 0.5; if (s < 0) s = 0; int k = (int)s; if (k > view.pw - 2) k = view.pw - 2; mapX[i] = k; fracX[i] = (int)((s - k) * 256); }
   for (int i = 0; i < dstH; i++) { double s = (i + 0.5) / scale - 0.5; if (s < 0) s = 0; int k = (int)s; if (k > view.ph - 2) k = view.ph - 2; mapY[i] = k; fracY[i] = (int)((s - k) * 256); }
+  build_span_tables();
   logmsg("view: %dx%d cells at 1/%d -> %dx%d map -> %dx%d at (%d,%d) on %dx%d", rw, rh, 1 << z, view.pw, view.ph, dstW, dstH, dstX, dstY, W, H);
 }
 // Density map -> bilinear resample -> palette -> pixels.
@@ -180,12 +213,23 @@ static void tour_center(double t, double *cx, double *cy) {
     if (t < segs[i]) { double u = t / segs[i]; u = u * u * (3 - 2 * u); *cx = TOUR[i].x + (TOUR[j].x - TOUR[i].x) * u; *cy = TOUR[i].y + (TOUR[j].y - TOUR[i].y) * u; return; } t -= segs[i]; }
   *cx = TOUR[0].x; *cy = TOUR[0].y;
 }
-static void set_center(double cx, double cy) { view.x = (int)(cx - view.w / 2.0); view.y = (int)(cy - view.h / 2.0); }
+static void set_center(double cx, double cy) { view.x = (int)(cx - view.w / 2.0); view.y = (int)(cy - view.h / 2.0); fullRepaint = 1; }
 static double tRender, tResample, tPresent; static LARGE_INTEGER qpf; static int pmLit; static HFONT pmFont; static int pmFontH;
 static double qnow(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return (double)t.QuadPart * 1000.0 / qpf.QuadPart; }
 static void render(void) {
   double a = qnow();
-  hl_density_cached(&uni, view.x, view.y, view.pw, view.ph, view.z, dens);
+  // highlight and afterglow are whole-map passes over dens/prevDens/chg/glow,
+  // so spans buy nothing while either is on; take the old path then.
+  int full = fullRepaint || cfg.afterglow > 0 || cfg.highlight;
+  if (full) {
+    hl_density_cached(&uni, view.x, view.y, view.pw, view.ph, view.z, dens);
+    for (int y = 0; y < view.ph; y++) { rowSpan[y].lo = 0; rowSpan[y].hi = view.pw; }
+    fullRepaint = 0;
+  } else {
+    for (int y = 0; y < view.ph; y++) if (prevRowSpan[y].lo < prevRowSpan[y].hi)
+      memset(dens + (size_t)y * view.pw + prevRowSpan[y].lo, 0, (size_t)(prevRowSpan[y].hi - prevRowSpan[y].lo));
+    hl_density_spans(&uni, view.x, view.y, view.pw, view.ph, view.z, dens, rowSpan);
+  }
   // The machine's AM/PM indicator: a box (pattern x 100..680, y 4150..4750) that is an
   // outline in the morning and filled in the afternoon, next to a static "PM" label
   // (x 700..1450). pm=text keeps the box, blanks the label, and writes AM or PM from
@@ -205,24 +249,41 @@ static void render(void) {
   if (cfg.afterglow > 0) { // trails: each map pixel keeps a decaying maximum of what has been there
     int k = (int)(cfg.afterglow * 256); size_t n = (size_t)view.pw * view.ph;
     for (size_t i = 0; i < n; i++) { int v = dens[i], g = glow[i]; if (v > g) g = v; dens[i] = (uint8_t)g; glow[i] = (uint8_t)((g * k) >> 8); } }
-  double b = qnow(); tRender += b - a;
+  // The AM/PM dot and the AM/PM text are drawn over the map by GDI below, so
+  // the map's own spans do not cover them and a cleared dot would linger.
+  if (cfg.pmMode >= 2) force_span(0, 4000, 2400, 5900);
   const int pw = view.pw, ph = view.ph, dw = dstW;
+  // Output columns to recompute on each map row: the union of this frame's span
+  // and last frame's, widened by one map column for the bilinear tap.
+  for (int y = 0; y < ph; y++) {
+    int lo = rowSpan[y].lo < prevRowSpan[y].lo ? rowSpan[y].lo : prevRowSpan[y].lo;
+    int hi = rowSpan[y].hi > prevRowSpan[y].hi ? rowSpan[y].hi : prevRowSpan[y].hi;
+    if (lo >= hi) { oLo[y] = dstW; oHi[y] = 0; continue; }   // empty: an interval that widens no union in pass 2
+    oLo[y] = invX[lo > 0 ? lo - 1 : 0]; oHi[y] = invX[hi < pw ? hi : pw];
+  }
+  memcpy(prevRowSpan, rowSpan, sizeof(HlSpan) * (size_t)ph);
+  double b = qnow(); tRender += b - a;
   if (unitScale) { // one map pixel per screen pixel: palette lookup only
     int cw = pw < scrW ? pw : scrW, chh = ph < scrH ? ph : scrH;
     for (int y = 0; y < chh; y++) { const uint8_t *r = dens + (size_t)y * pw, *c = chg + (size_t)y * pw; uint32_t *out = pixels + (size_t)y * scrW;
-      if (cfg.highlight) for (int x = 0; x < cw; x++) out[x] = (c[x] > 30 ? lutHot : lut)[r[x]]; else for (int x = 0; x < cw; x++) out[x] = lut[r[x]]; }
+      int xa = oLo[y], xb = oHi[y] > cw ? cw : oHi[y]; if (xa >= xb) continue;   // one map pixel per screen pixel: spans are output columns already
+      if (cfg.highlight) for (int x = xa; x < xb; x++) out[x] = (c[x] > 30 ? lutHot : lut)[r[x]]; else for (int x = xa; x < xb; x++) out[x] = lut[r[x]]; }
     tResample += qnow() - b; goto overlays;
   }
   // Pass 1: each source row resampled horizontally once (gather).
-  for (int y = 0; y < ph; y++) { const uint8_t *r = dens + (size_t)y * pw; uint8_t *o = hrows + (size_t)y * dw;
-    for (int x = 0; x < dw; x++) { int k = mapX[x], fx = fracX[x]; o[x] = (uint8_t)((r[k] * (256 - fx) + r[k + 1] * fx) >> 8); } }
+  for (int y = 0; y < ph; y++) { int xa = oLo[y], xb = oHi[y]; if (xa >= xb) continue;
+    const uint8_t *r = dens + (size_t)y * pw; uint8_t *o = hrows + (size_t)y * dw;
+    for (int x = xa; x < xb; x++) { int k = mapX[x], fx = fracX[x]; o[x] = (uint8_t)((r[k] * (256 - fx) + r[k + 1] * fx) >> 8); } }
   // Pass 2: blend two resampled rows (streaming, vectorisable) and apply the palette.
   int y0 = dstY < 0 ? -dstY : 0, y1 = dstY + dstH > scrH ? scrH - dstY : dstH, x0 = dstX < 0 ? -dstX : 0, x1 = dstX + dw > scrW ? scrW - dstX : dw;
   for (int y = y0; y < y1; y++) {
-    const uint8_t *a0 = hrows + (size_t)mapY[y] * dw, *a1 = a0 + dw; int fy = fracY[y], gy = 256 - fy;
+    int sy = mapY[y];   // this output row blends map rows sy and sy+1
+    int xa = oLo[sy] < oLo[sy + 1] ? oLo[sy] : oLo[sy + 1], xb = oHi[sy] > oHi[sy + 1] ? oHi[sy] : oHi[sy + 1];
+    if (xa < x0) xa = x0; if (xb > x1) xb = x1; if (xa >= xb) continue;
+    const uint8_t *a0 = hrows + (size_t)sy * dw, *a1 = a0 + dw; int fy = fracY[y], gy = 256 - fy;
     uint32_t *out = pixels + (size_t)(dstY + y) * scrW + dstX;
-    if (cfg.highlight) { const uint8_t *c = chg + (size_t)mapY[y] * pw; for (int x = x0; x < x1; x++) out[x] = (c[mapX[x]] > 30 ? lutHot : lut)[(a0[x] * gy + a1[x] * fy) >> 8]; }
-    else for (int x = x0; x < x1; x++) out[x] = lut[(a0[x] * gy + a1[x] * fy) >> 8];
+    if (cfg.highlight) { const uint8_t *c = chg + (size_t)sy * pw; for (int x = xa; x < xb; x++) out[x] = (c[mapX[x]] > 30 ? lutHot : lut)[(a0[x] * gy + a1[x] * fy) >> 8]; }
+    else for (int x = xa; x < xb; x++) out[x] = lut[(a0[x] * gy + a1[x] * fy) >> 8];
   }
   tResample += qnow() - b;
 overlays:
@@ -349,7 +410,7 @@ static void create_dib(int W, int H) {
   BITMAPINFO bi = { 0 }; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
   dib = CreateDIBSection(memdc, &bi, DIB_RGB_COLORS, &dibBits, NULL, 0); SelectObject(memdc, dib);
   if (pixels && pixels != (uint32_t *)dibBits) free(pixels); pixels = (uint32_t *)dibBits;
-  uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; dibPainted = 0;
+  uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; dibPainted = 0; fullRepaint = 1;
 }
 #define WM_TRAY (WM_APP + 1)
 #define ID_PAUSE 1
@@ -675,6 +736,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--quit")) { int fs = 0; for (int j = 1; j < argc; j++) if (!strcmp(argv[j], "--fullscreen")) fs = 1;
       HANDLE ev = OpenEventA(EVENT_MODIFY_STATE, FALSE, fs ? "LifeClockFullscreenQuit" : "LifeClockWallpaperQuit"); if (ev) { SetEvent(ev); CloseHandle(ev); return 0; } return 1; }
   }
+  int selfCheck = 0; for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--selfcheck")) selfCheck = 1;
   const char *frameArg = cfg.frame;
   char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH); strcpy(exePath, exe); char *slash = strrchr(exe, '\\'); if (slash) slash[1] = 0; strcpy(exeDir, exe);
   snprintf(logPath, sizeof logPath, "%slife-clock.log", exe);
@@ -718,6 +780,18 @@ int main(int argc, char **argv) {
     int64_t target = target_generation(); while (target - uni.generation >= GPS) { int64_t step = target - uni.generation; if (step > PERIOD) step = PERIOD; hl_advance(&uni, step); target = target_generation(); }
     QueryPerformanceCounter(&t1); logmsg("synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
     render(); if (cfg.afterglow > 0 || cfg.highlight) for (int i = 0; i < 8; i++) { hl_advance(&uni, 32); render(); } GdiFlush();
+    if (selfCheck) { // --selfcheck: does the partial repaint draw the same picture as the whole one?
+      size_t np = (size_t)W * H; uint32_t *ref = malloc(np * 4); int worst = 0;
+      for (int i = 0; i < 32; i++) {
+        hl_advance(&uni, 32); render(); GdiFlush(); memcpy(ref, pixels, np * 4);   // span-restricted
+        fullRepaint = 1; render(); GdiFlush();                                     // same generation, whole picture
+        size_t diff = 0; for (size_t k = 0; k < np; k++) if (ref[k] != pixels[k]) diff++;
+        if ((int)diff > worst) worst = (int)diff;
+        logmsg("self-check frame %d: %llu of %llu pixels differ", i, (unsigned long long)diff, (unsigned long long)np);
+      }
+      logmsg("render self-check: worst frame differed in %d pixels (0 = the partial repaint is exact)", worst);
+      free(ref);
+    }
     if (cfg.frames > 1) { tourStart = 0; for (int i = 0; i < cfg.frames; i++) { char fn[MAX_PATH]; snprintf(fn, sizeof fn, "%s_%03d.bmp", cfg.frame, i);
         if (cfg.tour > 0 && cfg.zoom) { double cx, cy; tour_center(i / 6.0, &cx, &cy); set_center(cx, cy); }
         hl_advance(&uni, cfg.frameStep > 0 ? cfg.frameStep : 32); render(); GdiFlush(); write_bmp(fn); } }
@@ -791,7 +865,7 @@ int main(int argc, char **argv) {
     target = target_generation(); int64_t behind = target - uni.generation;
     if (behind < -PERIOD || behind > 30 * PERIOD) { logmsg("resync: behind %lld", (long long)behind); load_snapshot(current_minute()); continue; }
     if (cfg.fullscreen && cfg.tour > 0 && cfg.zoom) { double cx, cy; tour_center((now - tourStart) / 1000.0, &cx, &cy); set_center(cx, cy); n_force = 1; }
-    if (palette_ease()) n_force = 1;
+    if (palette_ease()) { n_force = 1; fullRepaint = 1; }   // the background itself moves: no pixel may be left standing
     int n = 0; while (behind >= stepGens && n < 8) { hl_advance(&uni, stepGens); behind -= stepGens; n++; }
     if (behind >= stepGens) { hl_advance(&uni, behind - behind % stepGens); n++; } // long pause: one jump
     if (n || n_force) { render(); present(); frames++; n_force = 0; }

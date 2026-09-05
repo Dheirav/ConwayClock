@@ -93,7 +93,24 @@ instead of minimising them, which the walk handles by stopping at Progman.
 Each frame: a density map of the view at 1/8 scale from the tile cache,
 a separable bilinear resample to the screen (each source row scaled once,
 then rows blended in a streaming pass), a palette lookup into the window's
-bitmap, and one GDI blit of the machine's rectangle. The palette actually drawn eases toward
+bitmap, and one GDI blit of the machine's rectangle.
+
+The map is mostly empty -- measured on the default view, 13 % of its 8x8
+tiles hold anything, and a single interval per row covers 33 % of it -- so
+the engine reports, per map row, the columns its descent touched, and the
+resample runs over the union of this frame's spans and the last frame's
+rather than the whole rectangle. What that union leaves alone keeps the
+pixels it already had. Anything that invalidates untouched pixels forces a
+whole-picture frame: a resize, a pan, and in particular a day/night fade,
+where the background colour itself moves. `highlight` and `afterglow` are
+whole-map passes in their own right and fall back to the old path.
+Tracking which tiles *changed* rather than which are occupied would not
+help: 95 % of the live tiles differ every frame, because nearly everything
+alive in this machine is a glider in flight.
+`native/test_hl.c` checks that the span-built map is byte-identical to a
+full rebuild and that the span-to-column arithmetic is never too narrow;
+`--frame out.bmp --selfcheck` renders 32 frames both ways on Windows and
+logs the pixel difference. The palette actually drawn eases toward
 the configured one, so a day/night switch fades over `fade` seconds instead
 of jumping. Optional passes on the density map: afterglow (a decaying maximum per pixel) and highlight (a
 decaying record of how much each pixel changed, selecting a second

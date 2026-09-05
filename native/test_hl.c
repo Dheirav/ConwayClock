@@ -41,6 +41,62 @@ int main(int argc, char **argv) {
   uint8_t *dens = malloc(1254 * 852);
   t0 = now_ms(); for (int i = 0; i < 20; i++) { hl_advance(&c, 64); hl_density_cached(&c, c.x0 - 8, c.y0 - 8, 1254, 852, 3, dens); } printf("advance(64)+cached render: %.2f ms\n", (now_ms() - t0) / 20);
   uint8_t *d2 = malloc(1254 * 852); hl_density(&c, c.x0 - 8, c.y0 - 8, 1254, 852, 3, d2); printf("cached render identical to plain: %s\n", memcmp(dens, d2, 1254 * 852) ? "NO" : "yes");
+  // 4. spans: the map built by clearing only the previous frame's ranges must be
+  // byte-identical to a full rebuild, and every live pixel must fall inside the
+  // span reported for its row. This is what lets the resample skip empty space.
+  {
+    // The default whole-machine view on 1920x1080, per setup_view() in main.c:
+    // 1550x925 map at 1/8 from (-300, 1677). It is wider and taller than the
+    // pattern, so it also exercises rows the descent never reaches.
+    const int SW = 1550, SH = 925; const int64_t sx = -300, sy = 1677;
+    uint8_t *ref = malloc((size_t)SW * SH), *spa = calloc((size_t)SW * SH, 1);
+    HlSpan *cur = malloc(sizeof(HlSpan) * SH), *prev = malloc(sizeof(HlSpan) * SH);
+    for (int i = 0; i < SH; i++) { prev[i].lo = SW; prev[i].hi = 0; }
+    int bad = 0, outside = 0; long covered = 0; double tFull = 0, tSpan = 0;
+    for (int f = 0; f < 200; f++) {
+      hl_advance(&c, 32);
+      double a = now_ms(); hl_density_cached(&c, sx, sy, SW, SH, 3, ref); tFull += now_ms() - a;
+      for (int y = 0; y < SH; y++) if (prev[y].lo < prev[y].hi) memset(spa + (size_t)y * SW + prev[y].lo, 0, prev[y].hi - prev[y].lo);
+      a = now_ms(); hl_density_spans(&c, sx, sy, SW, SH, 3, spa, cur); tSpan += now_ms() - a;
+      if (memcmp(ref, spa, (size_t)SW * SH)) bad++;
+      for (int y = 0; y < SH; y++) { const uint8_t *r = ref + (size_t)y * SW;
+        for (int x = 0; x < SW; x++) if (r[x] && (x < cur[y].lo || x >= cur[y].hi)) { outside++; break; }
+        if (cur[y].lo < cur[y].hi) covered += cur[y].hi - cur[y].lo; }
+      HlSpan *t = cur; cur = prev; prev = t;
+    }
+    printf("spans: %d/200 frames differ from a full rebuild, %d rows with live pixels outside their span\n", bad, outside);
+    printf("spans cover %.1f%% of the %dx%d view map (what the resample can skip); density fill %.2f ms full vs %.2f ms with spans\n",
+           100.0 * covered / (200.0 * SW * SH), SW, SH, tFull / 200, tSpan / 200);
+    if (bad || outside) ok = 0;
+    free(ref); free(spa); free(cur); free(prev);
+  }
+  // 5. The span -> output-column mapping the restricted resample relies on.
+  // An output column x blends map columns mapX[x] and mapX[x]+1, so a span
+  // [lo, hi) of changed map columns invalidates exactly those x with
+  // mapX[x] in [lo-1, hi). render() takes that range as [invX[lo-1], invX[hi]).
+  // Too wide only wastes work; too narrow leaves stale pixels on screen.
+  {
+    const int pw = 1550, ph = 925;               // default view, per setup_view()
+    double scale = (1920.0 / pw < 1080.0 / ph) ? 1920.0 / pw : 1080.0 / ph;
+    int dw = (int)(pw * scale);
+    int *mapX = malloc(sizeof(int) * dw), *invX = malloc(sizeof(int) * (pw + 2));
+    for (int i = 0; i < dw; i++) { double sv = (i + 0.5) / scale - 0.5; if (sv < 0) sv = 0; int k = (int)sv; if (k > pw - 2) k = pw - 2; mapX[i] = k; }
+    for (int k = 0; k <= pw + 1; k++) invX[k] = dw;
+    for (int x = dw - 1; x >= 0; x--) invX[mapX[x]] = x;
+    for (int k = pw; k >= 0; k--) if (invX[k] > invX[k + 1]) invX[k] = invX[k + 1];
+    int narrow = 0, checked = 0;
+    for (int t = 0; t < 20000; t++) {
+      int lo = rand() % pw, hi = lo + 1 + rand() % (pw - lo);
+      int e0 = dw, e1 = 0;                        // columns that actually read [lo, hi)
+      for (int x = 0; x < dw; x++) { int k = mapX[x]; if ((k >= lo && k < hi) || (k + 1 >= lo && k + 1 < hi)) { if (x < e0) e0 = x; if (x + 1 > e1) e1 = x + 1; } }
+      int g0 = invX[lo > 0 ? lo - 1 : 0], g1 = invX[hi < pw ? hi : pw];
+      if (e0 < e1 && (g0 > e0 || g1 < e1)) narrow++;
+      checked++;
+    }
+    printf("span->column mapping: %d/%d random spans where the resample range was too narrow\n", narrow, checked);
+    if (narrow) ok = 0;
+    free(mapX); free(invX);
+  }
   t0 = now_ms(); hl_advance(&c, 11520LL * 720); printf("12-hour jump: %.1f s, gen %lld, rss %ld MB\n", (now_ms() - t0) / 1e3, (long long)c.generation, rss_mb());
   return ok ? 0 : 1;
 }
