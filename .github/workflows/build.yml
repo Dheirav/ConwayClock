@@ -14,8 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # release notes need the tag history
 
       - name: Install Zig
         run: |
@@ -49,24 +47,6 @@ jobs:
             native/life-clock.scr
             native/life-clock.sample.ini
 
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-          TAG="${GITHUB_REF_NAME}"
-          ( cd native && sha256sum life-clock.exe life-clock.scr life-clock.sample.ini ) > SHA256SUMS.txt
-          tools/release-notes.sh "$TAG" SHA256SUMS.txt > notes.md
-          TITLE="$(git tag -l --format='%(contents:subject)' "$TAG")"
-          [ -n "$TITLE" ] || TITLE="$TAG"
-          FILES="native/life-clock.exe native/life-clock.scr native/life-clock.sample.ini SHA256SUMS.txt"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TITLE" --notes-file notes.md
-            gh release upload "$TAG" $FILES --clobber
-          else
-            gh release create "$TAG" $FILES --title "$TITLE" --notes-file notes.md
-          fi
 
   # Nothing else in CI runs Windows code: the Linux tests cover the engine and the
   # sync arithmetic, so main.c ships on the strength of compiling. This renders a
@@ -129,3 +109,37 @@ jobs:
             if ($pct -lt 1.0) { throw "$($c.name): frame is blank -- only $pct% of it is not background" }
           }
           Write-Host "all cases rendered and self-checked"
+
+  # Publishing waits on the Windows check: a tagged build that renders nothing
+  # on Windows must not become a release.
+  release:
+    needs: [build, windows-check]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # release notes need the tag history
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: life-clock
+          path: dist
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          ( cd dist && sha256sum life-clock.exe life-clock.scr life-clock.sample.ini ) > SHA256SUMS.txt
+          tools/release-notes.sh "$TAG" SHA256SUMS.txt > notes.md
+          TITLE="$(git tag -l --format='%(contents:subject)' "$TAG")"
+          [ -n "$TITLE" ] || TITLE="$TAG"
+          FILES="dist/life-clock.exe dist/life-clock.scr dist/life-clock.sample.ini SHA256SUMS.txt"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TITLE" --notes-file notes.md
+            gh release upload "$TAG" $FILES --clobber
+          else
+            gh release create "$TAG" $FILES --title "$TITLE" --notes-file notes.md
+          fi
