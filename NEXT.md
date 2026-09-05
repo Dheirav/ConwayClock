@@ -277,9 +277,13 @@ Two things about the sweep worth keeping:
   start. 30-minute spacing would give 48 snapshots and roughly a 6 MB exe
   for a 4–6 s start. A trade, not an improvement — worth knowing the option
   exists.
-- **Test coverage of the cycle.** `test_clock` samples 12 minutes. A full
-  1,440-minute sweep is too slow for CI but fine as a pre-release job, and
-  it is the same loop item 5 needs.
+- **Test coverage of the cycle.** `test_clock` samples 12 minutes.
+  `native/sweep_lag.c` now covers all 1,440 -- it reads the display at every
+  64th generation of the day and knows which minute each reading shows -- but
+  it is a 20-to-35-minute offline tool, not a test, and nothing asserts on
+  its output. Turning it into a pre-release gate would mostly mean deciding
+  what to assert, given that a minute ending in 7 is legitimately correct for
+  only three seconds.
 - **No test for the settings layer.** `apply_setting` and `clamp_settings`
   (`native/main.c:506`, `:540`) parse every ini key and are exercised only
   by hand.
