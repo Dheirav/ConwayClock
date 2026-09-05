@@ -117,13 +117,24 @@ Steps 1 and 2 are implemented on `main`; step 3 needs a Windows machine.
   with no live pixel outside its row's span (passes, 0/200), and the
   span-to-output-column mapping must never be too narrow over 20,000 random
   spans (passes, 0/20,000).
-- **Not done: the actual measurement.** Every figure above is the density
-  layer on Linux. Nobody has yet run the changed binary on Windows, so the
-  claimed 4 % to ~2.3 % is still a prediction. Run
-  `life-clock.exe --frame out.bmp --selfcheck`, which renders 32 frames both
-  ways at the same generation and logs the pixel difference (0 means the
-  partial repaint is exact), then read the per-minute
-  `[render, resample, present ms/frame]` line from a normal run.
+- **Done: measured on Windows 2026-09-05** via `--frame out.bmp --selfcheck`,
+  which now also times both paths. Default 1080p view, per frame: partial
+  2.01 ms (render 0.77 + resample 1.24) against whole-picture 4.04 ms
+  (render 0.66 + resample 3.38), no pixel differing over 32 frames. The
+  resample lands at 37 % of its former cost, against 33 % predicted; the span
+  bookkeeping costs about 0.11 ms of render. With the blit unchanged at
+  0.9-1.0 ms a frame goes from ~5.0 ms to ~3.0 ms, so frame work at 6 fps
+  drops from ~30 ms/s to ~18 ms/s. The process CPU figure in
+  `docs/HOW-IT-WORKS.md` has not been re-measured over a long run.
+- **At `zoom = 4` it buys nothing**: 2.31 ms against 2.40 ms. The watch view
+  is a dense crop with little empty space. Expected, and the right way round.
+- **The self-check was wrong at first and is worth not repeating.** It
+  rendered one partial frame and then a whole-picture frame at the same
+  generation, in a loop -- so every partial frame followed a full one, its
+  spans were unioned with a full-width previous frame, and the comparison was
+  full against full. It reported 0 differences for the wrong reason. It now
+  runs three partial frames before comparing, which is the minimum for the
+  repaint to be genuinely narrow.
 
 Watch for when measuring: `highlight` and `afterglow` deliberately fall back
 to the whole-picture path, so measure with both off, which is the default.

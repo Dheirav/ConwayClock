@@ -109,8 +109,19 @@ help: 95 % of the live tiles differ every frame, because nearly everything
 alive in this machine is a glider in flight.
 `native/test_hl.c` checks that the span-built map is byte-identical to a
 full rebuild and that the span-to-column arithmetic is never too narrow;
-`--frame out.bmp --selfcheck` renders 32 frames both ways on Windows and
-logs the pixel difference. The palette actually drawn eases toward
+`--frame out.bmp --selfcheck` renders on Windows both ways at the same
+generation and logs the pixel difference and the cost of each. Measured on
+the 1080p default view, per frame: 2.01 ms partial (render 0.77, resample
+1.24) against 4.04 ms whole-picture (render 0.66, resample 3.38), with no
+pixel differing. The resample falls to 37 % of its former cost and the span
+bookkeeping adds about 0.11 ms to the render, so a frame's render and
+resample together halve.
+
+The saving is a property of the zoomed-out view, where most of the map is
+empty. At `zoom = 4`, the watch view, the same measurement gives 2.31 ms
+against 2.40 ms: the crop is dense, there is little empty space to skip, and
+the partial repaint is worth nothing. That is the right way round, since the
+wallpaper is what runs all day. The palette actually drawn eases toward
 the configured one, so a day/night switch fades over `fade` seconds instead
 of jumping. Optional passes on the density map: afterglow (a decaying maximum per pixel) and highlight (a
 decaying record of how much each pixel changed, selecting a second

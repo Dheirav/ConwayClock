@@ -780,16 +780,32 @@ int main(int argc, char **argv) {
     int64_t target = target_generation(); while (target - uni.generation >= GPS) { int64_t step = target - uni.generation; if (step > PERIOD) step = PERIOD; hl_advance(&uni, step); target = target_generation(); }
     QueryPerformanceCounter(&t1); logmsg("synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
     render(); if (cfg.afterglow > 0 || cfg.highlight) for (int i = 0; i < 8; i++) { hl_advance(&uni, 32); render(); } GdiFlush();
-    if (selfCheck) { // --selfcheck: does the partial repaint draw the same picture as the whole one?
-      size_t np = (size_t)W * H; uint32_t *ref = malloc(np * 4); int worst = 0;
+    if (selfCheck && (cfg.highlight || cfg.afterglow > 0)) {
+      // Both keep state between renders -- chg decays and prevDens is replaced,
+      // glow decays -- so rendering the same generation twice does not give the
+      // same picture, and both force the whole-picture path anyway, leaving no
+      // partial repaint to check.
+      logmsg("render self-check skipped: highlight/afterglow keep state between renders and take the whole-picture path");
+    } else if (selfCheck) { // does the partial repaint draw the same picture as the whole one?
+      size_t np = (size_t)W * H; uint32_t *ref = malloc(np * 4); int worst = 0, n = 0;
+      double pR = 0, pS = 0, fR = 0, fS = 0;
       for (int i = 0; i < 32; i++) {
-        hl_advance(&uni, 32); render(); GdiFlush(); memcpy(ref, pixels, np * 4);   // span-restricted
-        fullRepaint = 1; render(); GdiFlush();                                     // same generation, whole picture
+        // Three partial frames in a row before comparing. The first frame after
+        // a whole-picture repaint still covers the full width, because each row's
+        // span is unioned with the previous frame's; only by the third is the
+        // repaint actually narrow, which is the case worth checking.
+        for (int k = 0; k < 3; k++) { hl_advance(&uni, 32); if (k == 2) tRender = tResample = 0; render(); }
+        GdiFlush(); pR += tRender; pS += tResample;
+        memcpy(ref, pixels, np * 4);
+        tRender = tResample = 0; fullRepaint = 1; render(); GdiFlush();   // same generation, whole picture
+        fR += tRender; fS += tResample; n++;
         size_t diff = 0; for (size_t k = 0; k < np; k++) if (ref[k] != pixels[k]) diff++;
         if ((int)diff > worst) worst = (int)diff;
         logmsg("self-check frame %d: %llu of %llu pixels differ", i, (unsigned long long)diff, (unsigned long long)np);
       }
       logmsg("render self-check: worst frame differed in %d pixels (0 = the partial repaint is exact)", worst);
+      logmsg("self-check timing over %d frames: partial %.2f ms (render %.2f + resample %.2f); whole picture %.2f ms (render %.2f + resample %.2f)",
+             n, (pR + pS) / n, pR / n, pS / n, (fR + fS) / n, fR / n, fS / n);
       free(ref);
     }
     if (cfg.frames > 1) { tourStart = 0; for (int i = 0; i < cfg.frames; i++) { char fn[MAX_PATH]; snprintf(fn, sizeof fn, "%s_%03d.bmp", cfg.frame, i);

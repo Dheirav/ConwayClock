@@ -94,10 +94,13 @@ jobs:
           # default: the shipping configuration. zoom 4: cfg.size 1.0 makes it the
           # unitScale path, which the resample treats separately. highlight: a
           # whole-map pass that deliberately falls back to the full repaint.
+          # highlight keeps state between renders and forces the whole-picture
+          # path, so there is no partial repaint to compare: it is here to prove
+          # that path still renders, not to be self-checked.
           $cases = @(
-            @{ name = "default";   args = @() },
-            @{ name = "zoom4";     args = @("--zoom", "4") },
-            @{ name = "highlight"; args = @("--highlight", "1") }
+            @{ name = "default";   args = @();                    expect = "worst frame differed in 0 pixels" },
+            @{ name = "zoom4";     args = @("--zoom", "4");        expect = "worst frame differed in 0 pixels" },
+            @{ name = "highlight"; args = @("--highlight", "1");   expect = "render self-check skipped" }
           )
 
           foreach ($c in $cases) {
@@ -111,8 +114,8 @@ jobs:
             if (-not (Test-Path $log)) { throw "$($c.name): wrote no log" }
 
             $text = Get-Content $log -Raw
-            if ($text -notmatch "worst frame differed in 0 pixels") {
-              throw "$($c.name): the partial repaint does not match the whole-picture path"
+            if ($text -notmatch [regex]::Escape($c.expect)) {
+              throw "$($c.name): expected '"'"'$($c.expect)'"'"' in the log"
             }
 
             # The frame must be a picture of the machine, not an empty screen.
