@@ -67,3 +67,62 @@ jobs:
           else
             gh release create "$TAG" $FILES --title "$TITLE" --notes-file notes.md
           fi
+
+  # Nothing else in CI runs Windows code: the Linux tests cover the engine and the
+  # sync arithmetic, so main.c ships on the strength of compiling. This renders a
+  # frame headlessly on a real Windows runner and checks the picture came out, and
+  # it runs --selfcheck, which draws 32 frames both with the span-restricted
+  # partial repaint and with the whole-picture path at the same generation and
+  # reports any pixel that differs.
+  windows-check:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: life-clock
+          path: dist
+
+      - name: Headless render and partial-repaint self-check
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dist = (Resolve-Path dist).Path
+          $exe  = Join-Path $dist "life-clock.exe"
+          $log  = Join-Path $dist "life-clock.log"
+
+          # default: the shipping configuration. zoom 4: cfg.size 1.0 makes it the
+          # unitScale path, which the resample treats separately. highlight: a
+          # whole-map pass that deliberately falls back to the full repaint.
+          $cases = @(
+            @{ name = "default";   args = @() },
+            @{ name = "zoom4";     args = @("--zoom", "4") },
+            @{ name = "highlight"; args = @("--highlight", "1") }
+          )
+
+          foreach ($c in $cases) {
+            $bmp = Join-Path $dist ("frame-" + $c.name + ".bmp")
+            Remove-Item $log -ErrorAction SilentlyContinue
+            $a = @("--frame", $bmp, "--selfcheck") + $c.args
+            $p = Start-Process -FilePath $exe -ArgumentList $a -Wait -PassThru -NoNewWindow
+            Write-Host "===== $($c.name): exit $($p.ExitCode) ====="
+            if (Test-Path $log) { Get-Content $log | Write-Host }
+            if ($p.ExitCode -ne 0) { throw "$($c.name): exited $($p.ExitCode)" }
+            if (-not (Test-Path $log)) { throw "$($c.name): wrote no log" }
+
+            $text = Get-Content $log -Raw
+            if ($text -notmatch "worst frame differed in 0 pixels") {
+              throw "$($c.name): the partial repaint does not match the whole-picture path"
+            }
+
+            # The frame must be a picture of the machine, not an empty screen.
+            if (-not (Test-Path $bmp)) { throw "$($c.name): wrote no frame" }
+            $b = [IO.File]::ReadAllBytes($bmp)
+            if ($b.Length -lt 100000) { throw "$($c.name): frame is only $($b.Length) bytes" }
+            $bg = $b[54]; $n = 0; $lit = 0            # byte 54 is the top-left pixel: background
+            for ($i = 54; $i -lt $b.Length; $i += 997) { $n++; if ($b[$i] -ne $bg) { $lit++ } }
+            $pct = 100.0 * $lit / $n
+            Write-Host ("$($c.name): {0:N1}% of sampled pixels differ from the background" -f $pct)
+            if ($pct -lt 1.0) { throw "$($c.name): frame is blank -- only $pct% of it is not background" }
+          }
+          Write-Host "all cases rendered and self-checked"

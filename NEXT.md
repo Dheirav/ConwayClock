@@ -156,20 +156,41 @@ render into an arbitrary HWND already exists — `--frame` renders headless
 into a memory DIB (`native/main.c:713`) and could blit into the preview
 handle at a low frame rate.
 
-## 4. CI never touches the Windows code
+## 4. CI and the Windows code
 
-**Cost: lowest. This is the insurance every later change needs.**
+**Done 2026-09-05**, except for one gap noted at the end.
 
-`.github/workflows/build.yml` builds and runs the *Linux* subset — the
-engine and the sync arithmetic. `main.c`, `settings.c` and `install.c` get
-compiled and nothing more. The whole Win32 path ships untested: view setup,
-palette build, ini parsing and clamping, the PM dot, the overlays.
+`.github/workflows/build.yml` gains a `windows-check` job: it takes the exe
+the Linux job already uploads as an artifact, and on a `windows-latest`
+runner renders a frame headlessly with `--frame` in three configurations --
+the shipping default, `--zoom 4` (which is the separate `unitScale` path in
+the resample), and `--highlight 1` (a whole-map pass that deliberately falls
+back to the full repaint). Each run must exit 0, must log
+`worst frame differed in 0 pixels` from `--selfcheck`, and must produce a
+frame in which at least 1 % of sampled pixels differ from the background, so
+a blank screen fails rather than passing quietly.
 
-`--frame out.bmp` already renders headless. A `windows-latest` job that
-runs it and then applies `test_clock.c`'s segment reader to the resulting
-BMP would cover all of that in one step. The reader would need to work in
-screen pixels rather than pattern coordinates, which is the only real work
-in it.
+That covers, on the platform it ships to, what nothing covered before:
+process start, snapshot load, ini defaults and clamping, view setup, palette
+building, both resample paths and the partial repaint's correctness.
+
+Still open:
+
+- **It does not gate releases.** The `Release` step lives in the `build`
+  job, which finishes before `windows-check` runs, so a tagged build
+  publishes whether or not the Windows check passes. Closing that means
+  splitting `Release` into its own job with
+  `needs: [build, windows-check]` -- straightforward, but it touches the
+  publishing path, so it is worth doing deliberately rather than as a
+  side effect.
+- **The frame is checked for being a picture, not for being the right
+  picture.** Reading the seven segments off the BMP the way
+  `test_clock.c` reads them off the grid would need the segment rectangles
+  mapped from pattern coordinates into screen pixels. That is the real work
+  in this item and it is not done.
+- **Unverified on a runner.** The job is written but has never executed;
+  in particular nobody has confirmed that a `windows-latest` runner gives
+  the process a display GDI is happy with. The first push will say.
 
 ## 5. The documented on-screen window does not hold near the wrap
 
@@ -219,9 +240,9 @@ Two ways out:
 
 ## Ranking
 
-1. Span-restricted resample (item 1) — highest value, it is the project's own thesis.
-2. Windows CI (item 4) — lowest cost, and everything else is safer after it.
-3. Lag sweep (item 5) — small, and it either improves the clock or settles the docs.
+1. ~~Span-restricted resample (item 1)~~ — implemented; the Windows measurement is what is left of it.
+2. ~~Windows CI (item 4)~~ — done; the release-gating split is what is left of it.
+3. Lag sweep (item 5) — now the largest open item, and it either improves the clock or settles the docs.
 
 Items 2, 3 and 6 are real but none of them is on the critical path of
 anything.
