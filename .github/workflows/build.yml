@@ -58,6 +58,8 @@ jobs:
     needs: build
     runs-on: windows-latest
     steps:
+      - uses: actions/checkout@v4   # for tools/read-frame.py
+
       - uses: actions/download-artifact@v4
         with:
           name: life-clock
@@ -109,6 +111,33 @@ jobs:
             if ($pct -lt 1.0) { throw "$($c.name): frame is blank -- only $pct% of it is not background" }
           }
           Write-Host "all cases rendered and self-checked"
+
+      - name: Does the rendered frame show the right time?
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dist = (Resolve-Path dist).Path
+          $exe  = Join-Path $dist "life-clock.exe"
+          $log  = Join-Path $dist "life-clock.log"
+
+          # test_clock.c checks the machine; this checks the picture of it. --gen
+          # renders one exact generation so the frame does not depend on the clock,
+          # and each is a minute-and-second that test_clock.c reports as reading
+          # cleanly (the machine spends part of every minute redrawing).
+          $cases = @(
+            @{ minute =   5; second = 30; expect = "12:05 PM" },
+            @{ minute = 360; second = 30; expect = "6:00 PM"  },
+            @{ minute = 720; second = 34; expect = "12:00 AM" }
+          )
+          foreach ($c in $cases) {
+            $gen = $c.minute * 11520 + 12800 + $c.second * 192
+            $bmp = Join-Path $dist ("t" + $c.minute + ".bmp")
+            Remove-Item $log -ErrorAction SilentlyContinue
+            $p = Start-Process -FilePath $exe -ArgumentList @("--frame", $bmp, "--gen", $gen) -Wait -PassThru -NoNewWindow
+            if ($p.ExitCode -ne 0) { throw "gen $gen : exited $($p.ExitCode)" }
+            python tools/read-frame.py $bmp $log --expect $c.expect
+            if ($LASTEXITCODE -ne 0) { throw "gen $gen : frame does not read as $($c.expect)" }
+          }
 
   # Publishing waits on the Windows check: a tagged build that renders nothing
   # on Windows must not become a release.

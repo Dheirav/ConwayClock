@@ -75,6 +75,8 @@ static int64_t target_generation(void) {
   return (int64_t)cycle_minute(&t) * PERIOD + DISPLAY_LAG + (int64_t)(s * GPS);
 }
 static int current_minute(void) { SYSTEMTIME t; GetLocalTime(&t); return cycle_minute(&t); }
+static int64_t forceGen;   // --gen N: render this generation instead of the one the clock asks for
+static int forced_minute(void) { return (int)((forceGen - DISPLAY_LAG) / PERIOD); }
 
 // ---- universe ----------------------------------------------------------------
 static Universe uni;
@@ -142,6 +144,10 @@ static void build_span_tables(void) {
   for (int x = dstW - 1; x >= 0; x--) invX[mapX[x]] = x;
   for (int k = view.pw; k >= 0; k--) if (invX[k] > invX[k + 1]) invX[k] = invX[k + 1];
   fullRepaint = 1;
+  // Machine-readable, for tools/read-frame.py: pattern (px,py) lands on screen at
+  // dstx + ((px - viewx) >> z) * dstw / pw, and likewise vertically.
+  logmsg("geometry: viewx %d viewy %d z %d pw %d ph %d dstx %d dsty %d dstw %d dsth %d",
+         view.x, view.y, view.z, view.pw, view.ph, dstX, dstY, dstW, dstH);
 }
 // Widen this frame's spans over a rectangle given in pattern coordinates, for
 // the overlays that are drawn on top of the map and so are not in its spans.
@@ -733,6 +739,7 @@ int main(int argc, char **argv) {
     return startup_install(!strcmp(argv[i], "--install-startup")) ? 0 : 1; }
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--frame") && i + 1 < argc) cfg.frame = argv[i + 1];
+    else if (!strcmp(argv[i], "--gen") && i + 1 < argc) forceGen = strtoll(argv[i + 1], NULL, 10);
     else if (!strcmp(argv[i], "--quit")) { int fs = 0; for (int j = 1; j < argc; j++) if (!strcmp(argv[j], "--fullscreen")) fs = 1;
       HANDLE ev = OpenEventA(EVENT_MODIFY_STATE, FALSE, fs ? "LifeClockFullscreenQuit" : "LifeClockWallpaperQuit"); if (ev) { SetEvent(ev); CloseHandle(ev); return 0; } return 1; }
   }
@@ -768,7 +775,7 @@ int main(int argc, char **argv) {
 
   QueryPerformanceFrequency(&qpf); hl_init(); theme_targets(); palette_snap();
   LARGE_INTEGER freq, t0, t1; QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&t0);
-  if (!load_snapshot(current_minute())) return 3;
+  if (!load_snapshot(forceGen > 0 ? forced_minute() : current_minute())) return 3;
   setup_view(W, H);
 
   if (cfg.frame) { // headless: sync, render into a memory DIB (so text overlays work), dump
@@ -777,7 +784,8 @@ int main(int argc, char **argv) {
     dib = CreateDIBSection(memdc, &bi, DIB_RGB_COLORS, &dibBits, NULL, 0); SelectObject(memdc, dib);
     free(pixels); pixels = (uint32_t *)dibBits;
     { uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; }
-    int64_t target = target_generation(); while (target - uni.generation >= GPS) { int64_t step = target - uni.generation; if (step > PERIOD) step = PERIOD; hl_advance(&uni, step); target = target_generation(); }
+    int64_t target = forceGen > 0 ? forceGen : target_generation();
+    while (target - uni.generation >= (forceGen > 0 ? 1 : GPS)) { int64_t step = target - uni.generation; if (step > PERIOD) step = PERIOD; hl_advance(&uni, step); if (!forceGen) target = target_generation(); }
     QueryPerformanceCounter(&t1); logmsg("synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
     render(); if (cfg.afterglow > 0 || cfg.highlight) for (int i = 0; i < 8; i++) { hl_advance(&uni, 32); render(); } GdiFlush();
     if (selfCheck && (cfg.highlight || cfg.afterglow > 0)) {

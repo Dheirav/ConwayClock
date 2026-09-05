@@ -194,11 +194,21 @@ Still open:
   `needs: [build, windows-check]` -- straightforward, but it touches the
   publishing path, so it is worth doing deliberately rather than as a
   side effect.
-- **The frame is checked for being a picture, not for being the right
-  picture.** Reading the seven segments off the BMP the way
-  `test_clock.c` reads them off the grid would need the segment rectangles
-  mapped from pattern coordinates into screen pixels. That is the real work
-  in this item and it is not done.
+- ~~The frame is checked for being a picture, not the right picture.~~
+  **Done 2026-09-05.** `tools/read-frame.py` reads the seven segments off
+  the BMP, using a `geometry:` line the program now logs to map pattern
+  coordinates to screen pixels. `--gen N` renders one exact generation so a
+  frame does not depend on the wall clock, and CI renders three that
+  `test_clock.c` reports as reading cleanly -- 12:05 PM, 6:00 PM, 12:00 AM --
+  and asserts each. Verified on Windows: all three read correctly, AM/PM dot
+  and leading 1 included.
+
+  The threshold in that reader is the subtle part. A lit horizontal segment
+  measures ~175 and a lit vertical ~75 against a background of 31, because
+  the sample rectangles are filled differently, so a midpoint split discards
+  every lit vertical. What is uniform is the unlit level, which is just
+  background, so the cut sits at 15 % of the range above the dimmest sample;
+  the dimmest lit segment clears that by 28 %.
 - **Unverified on a runner.** The job is written but has never executed;
   in particular nobody has confirmed that a `windows-latest` runner gives
   the process a display GDI is happy with. The first push will say.
