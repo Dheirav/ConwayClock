@@ -224,36 +224,50 @@ Still open:
   in particular nobody has confirmed that a `windows-latest` runner gives
   the process a display GDI is happy with. The first push will say.
 
-## 5. The documented on-screen window does not hold near the wrap
+## 5. The display lag
 
-`docs/SETUP.md` says the right time is on screen "for 20 to 45 seconds of
-each minute, least around an hour rollover." The 2026-09-05 `test_clock`
-run measured a wider spread than that at both ends:
+**Done 2026-09-05.** 12,800 stays; the documentation was what was wrong.
 
-| Time | Correct for |
-|---|---|
-| 12:05 | 40 s (seconds 12–52) |
-| 12:10, 14:10 | 24 s |
-| 13:00 | 16 s |
-| **00:01** | **8 s** (seconds 24–32) |
+`native/sweep_lag.c` walks the whole 24-hour cycle at 64-generation
+resolution recording what the display reads, then scores every lag from
+6,400 to 24,000 against that single pass -- a lag only chooses which of
+those readings the wallpaper would have shown, so one sweep answers for all
+of them. `tools/lag-progress.sh` watches it (20 to 35 minutes);
+`SWEEP_CACHE=<file>` saves the readings so re-scoring is instant.
 
-So the floor is 8 s, not 20 s, and the outlier is 00:01 — the minute after
-the 12-hour wrap — not 00:00, and not an hour rollover. Every test passed;
-this is the machine's redraw behaviour, not a fault. But it is the one
-number in `SETUP.md` a user would check their clock against.
+Result: the best mean available is 29.8 s of each minute correct, at lag
+11,584. 12,800 gives 29.6, on a plateau from about 11,300 to 14,300. No
+better constant exists, and the worst case cannot be bought either -- the
+best worst-case minute over all lags is 4 s, at 8,128, whose mean is 21.4.
 
-Two ways out:
+What the sweep did find is that `docs/SETUP.md` was wrong twice over. It
+claimed 20 to 45 seconds a minute, "least around an hour rollover". The real
+range is 3 to 51 s, and the worst minutes are not rollovers: they are every
+minute ending in 7, at any hour.
 
-- Widen the documented range to what the test prints. Honest, five minutes.
-- More interesting: `DISPLAY_LAG = 12800` (`native/main.c`, mirrored in
-  `native/test_clock.c:18`) came from sampling *some* minutes across the
-  cycle. If the wrap minutes settle in a different window, the single
-  centred constant is not centred there, and a per-region lag would buy
-  back visible seconds. `test_clock.c` already computes the correct-seconds
-  range per minute, so sweeping lag values across all 1,440 minutes is a
-  loop around code that exists — an offline job, run once, that either
-  finds a better constant or proves 12,800 is right and settles the
-  documentation.
+| Last digit | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Mean seconds correct | 35 | 12 | 43 | 23 | 13 | 44 | 43 | **3** | 47 | 33 |
+
+A digit reads correctly only once every segment that should be dark has
+drained, so what matters is how many segments the previous digit lit that
+this one does not. 7 follows 6 and must clear d, e, f and g while lighting
+only b: three seconds. 8 follows 7 and clears nothing: forty-seven. Both
+documents now say this.
+
+Two things about the sweep worth keeping:
+
+- **Do not wrap the cycle.** The first version scored the last minutes of
+  the day by taking generations past 24 hours modulo the cycle. That is
+  wrong: generation 0 was hand-set to 12:00 rather than arrived at from
+  11:59, so the start of the pattern is not a continuation of its end. The
+  wallpaper does not wrap either -- it loads the last snapshot and runs the
+  machine on past 24 hours. The sweep now samples 30,000 generations past
+  the end. Before the fix minutes 1438 and 1439 scored 0 and every
+  worst-case figure was meaningless.
+- **The progress ETA was half the truth.** `tools/lag-progress.sh` derives
+  it from the measured rate, but the rate decays as the memo grows and the
+  collector starts firing: it read 17 minutes on a run that took 34.
 
 ## 6. Smaller
 
@@ -274,7 +288,7 @@ Two ways out:
 
 1. ~~Span-restricted resample (item 1)~~ — implemented; the Windows measurement is what is left of it.
 2. ~~Windows CI (item 4)~~ — done; the release-gating split is what is left of it.
-3. Lag sweep (item 5) — now the largest open item, and it either improves the clock or settles the docs.
+3. ~~Lag sweep (item 5)~~ — done; 12,800 confirmed, the documentation corrected.
 
 Items 2, 3 and 6 are real but none of them is on the critical path of
 anything.

@@ -46,6 +46,16 @@ between 11,392 and 14,210 therefore covers every one of those windows
 without ever settling on the previous or the next minute, and 12,800 is
 its centre.
 
+`native/sweep_lag.c` later checked that constant against the whole cycle
+rather than a sample: it walks all 24 hours at 64-generation resolution,
+recording what the display reads, and then scores every candidate lag
+against that one pass, since a lag only chooses which of those readings the
+wallpaper would have shown. The answer is that 12,800 is right -- 29.6
+seconds of each minute correct against a best-possible 29.8 at 11,584, on a
+plateau from about 11,300 to 14,300. `tools/lag-progress.sh` watches the
+sweep, which takes 20 to 35 minutes; `SWEEP_CACHE=<file>` saves the readings
+so that re-scoring costs nothing.
+
 144 precomputed states, one per 10 minutes of the cycle, are embedded in
 the executable (`native/snapshots_data.c`, generated from
 `snapshots/*.rle.gz`). On start the nearest earlier one is loaded and

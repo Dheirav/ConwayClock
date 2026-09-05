@@ -131,15 +131,30 @@ but a segment switching off keeps the gliders already travelling along it
 until they drain out. Measured across the cycle, the digits for a minute
 settle between 1.23 and 1.63 minutes after that minute's own generation and
 begin changing again between 1.68 and 1.99 minutes, so the machine spends
-roughly a third of every minute redrawing, and a digit can briefly read as
+about half of every minute redrawing, and a digit can briefly read as
 something else on the way (a 1 becoming a 2 passes through a 7).
 
-The program runs the machine 12,800 generations ahead of its counter, the
-centre of the range that shows the current minute for as much of it as the
-machine allows while never settling on a stale or early one. In practice
-the right time is on screen for 20 to 45 seconds of each minute, least
-around an hour rollover, and the rest of the minute is visibly a redraw.
-`native/test_clock.c` checks this on every push.
+The program runs the machine 12,800 generations ahead of its counter.
+`native/sweep_lag.c` walked the whole 24-hour cycle at 64-generation
+resolution and scored every lag from 6,400 to 24,000: the best mean
+available is 29.8 seconds of each minute correct, at lag 11,584, and 12,800
+gives 29.6 on a plateau running from about 11,300 to 14,300. There is no
+better constant to be had.
+
+How long the right time is actually on screen varies far more than that mean
+suggests, and it depends almost entirely on the last digit of the minute:
+
+| Last digit | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Mean seconds correct | 35 | 12 | 43 | 23 | 13 | 44 | 43 | **3** | 47 | 33 |
+
+A digit reads correctly only once every segment that should be dark has
+drained. 7 follows 6 and has to clear four segments (d, e, f and g) while
+lighting only b, so a minute ending in 7 is right for about three seconds;
+8 follows 7 and clears nothing, so it is right for forty-seven. Over all
+1,440 minutes, 10 % are correct for under ten seconds and 48 % for forty or
+more, the best being 12:00 at fifty-one. `native/test_clock.c` checks a
+sample of this on every push.
 
 ## Pausing
 
