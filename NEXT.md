@@ -249,9 +249,18 @@ Still open:
   every lit vertical. What is uniform is the unlit level, which is just
   background, so the cut sits at 15 % of the range above the dimmest sample;
   the dimmest lit segment clears that by 28 %.
-- **Unverified on a runner.** The job is written but has never executed;
-  in particular nobody has confirmed that a `windows-latest` runner gives
-  the process a display GDI is happy with. The first push will say.
+- **First run failed on a quoting bug, fixed 2026-09-06.** A bash
+  single-quote escape (`'"'"'`) written inside an already-quoted heredoc
+  leaked into the workflow's PowerShell verbatim. The job died parsing the
+  script in 11 seconds and never launched the exe, so the check was still
+  unproven. Before pushing a change to a `shell: pwsh` block, extract it and
+  parse it: PowerShell's own parser will say, and it costs seconds.
+
+      python3 -c "import yaml; ..."   # write each pwsh run: block to a file
+      [System.Management.Automation.Language.Parser]::ParseFile(...)
+
+- **Still unverified on a runner** beyond the parse: nobody has yet confirmed
+  a `windows-latest` runner gives the process a display GDI is happy with.
 
 ## 5. The display lag
 

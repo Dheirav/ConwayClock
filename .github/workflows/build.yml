@@ -97,7 +97,7 @@ jobs:
 
             $text = Get-Content $log -Raw
             if ($text -notmatch [regex]::Escape($c.expect)) {
-              throw "$($c.name): expected '"'"'$($c.expect)'"'"' in the log"
+              throw "$($c.name): log does not contain [$($c.expect)]"
             }
 
             # The frame must be a picture of the machine, not an empty screen.
