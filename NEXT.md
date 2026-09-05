@@ -152,18 +152,47 @@ to the whole-picture path, so measure with both off, which is the default.
 
 ## 2. Multi-monitor
 
-`pick_monitor` (`native/main.c:645`) selects one display by index; the
-others keep the plain wallpaper. `docs/SETUP.md` marks `monitor` untested.
+Not "untested" -- **not implemented**, and 2026-09-05 found the specific
+reason.
 
-Two separable pieces:
+`attach_to_desktop` parents the window inside `SHELLDLL_DefView` and then
+positioned it at `g_monX, g_monY`, which are *screen* coordinates from
+`pick_monitor`. Once `SetParent` has made it a child, a window's position is
+in its **parent's client** coordinates. Those coincide only for the primary
+monitor, where both are (0,0), which is why this never showed. Measured on
+the real desktop, DefView is exactly the primary monitor:
 
-- Verify the index actually works on a second display. Cheap, needs
-  hardware.
-- Decide what spanning means: one machine stretched across the virtual
-  desktop, or one instance per monitor. `attach_to_desktop`
-  (`native/main.c:275`) parents into a single `SHELLDLL_DefView`, so the
-  stretched version is window geometry rather than an architecture change.
-  Per-monitor instances collide with the single-instance mutex in `main`.
+```
+Progman            (0,0)-(1920,1080)  exstyle WS_EX_NOREDIRECTIONBITMAP
+  SHELLDLL_DefView (0,0)-(1920,1080)
+```
+
+So a second display at x=1920 would place the child at DefView-client
+(1920, 0) -- entirely outside its parent, clipped to nothing. The other
+strategies are no better: 1 through 4 pass `0,0` or `SWP_NOMOVE`, and 5 and 6
+were pinned to screen (0,0). None honoured a non-primary monitor.
+
+Fixed so far: the coordinate space (`ScreenToClient` for child strategies,
+the monitor origin for top-level ones), plus a `placement:` log line giving
+the window rect, the parent rect and its client size, which says outright
+when the window has landed outside its parent. Verified on the primary
+monitor -- window (0,0)-(1920,1080) exactly filling its parent, no clipping,
+no change in behaviour.
+
+**Still unverified on an actual second monitor**, and the coordinate fix
+alone may well not be enough: a child is clipped to its parent, and if
+DefView only ever covers the primary monitor then strategy 7 cannot host a
+second one at all. A second display would then need the top-level route
+(`attach = 5`) placed at the monitor's rect, or a per-monitor instance, which
+collides with the single-instance mutex. The `placement:` line answers which
+in one run.
+
+An attempt to test it over Miracast on 2026-09-05 failed for reasons with
+nothing to do with this code: the sink advertised its Wi-Fi Direct group on
+channel 1 while the laptop was associated on channel 52, a DFS channel, where
+Wi-Fi Direct groups are not permitted. Tailscale was ruled out by stopping
+the service. Testing needs a display that does not depend on the Wi-Fi
+channel plan.
 
 ## 3. The screensaver preview is blank
 

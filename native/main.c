@@ -338,6 +338,26 @@ static int screen_shows_us(void) {
   logmsg("screen check at (%d,%d): %d%% of the patch matches", x0, y0, same * 100 / total);
   return same * 10 >= total * 7;
 }
+// After attaching, say where the window actually landed. A child is clipped to
+// its parent's client area, and on a second monitor that is what goes wrong:
+// the desktop's shell view covers the primary monitor only, so a window placed
+// at another monitor's origin falls outside it and is clipped away entirely.
+static void report_placement(HWND parent) {
+  RECT w; GetWindowRect(hwnd, &w);
+  if (!parent) { logmsg("placement: window (%ld,%ld)-(%ld,%ld), top-level, monitor at (%d,%d) %dx%d",
+                        w.left, w.top, w.right, w.bottom, g_monX, g_monY, scrW, scrH); return; }
+  RECT pc, pw; GetClientRect(parent, &pc); GetWindowRect(parent, &pw);
+  logmsg("placement: window (%ld,%ld)-(%ld,%ld); parent %p screen (%ld,%ld)-(%ld,%ld) client %ldx%ld; monitor (%d,%d) %dx%d",
+         w.left, w.top, w.right, w.bottom, (void *)parent, pw.left, pw.top, pw.right, pw.bottom,
+         pc.right, pc.bottom, g_monX, g_monY, scrW, scrH);
+  RECT vis; // what survives the parent's clip
+  vis.left = w.left > pw.left ? w.left : pw.left; vis.top = w.top > pw.top ? w.top : pw.top;
+  vis.right = w.right < pw.right ? w.right : pw.right; vis.bottom = w.bottom < pw.bottom ? w.bottom : pw.bottom;
+  if (vis.right <= vis.left || vis.bottom <= vis.top)
+    logmsg("placement: WINDOW IS ENTIRELY OUTSIDE ITS PARENT and will not be drawn -- the parent covers the primary monitor only, so this monitor cannot host the wallpaper this way");
+  else if (vis.right - vis.left < (w.right - w.left) || vis.bottom - vis.top < (w.bottom - w.top))
+    logmsg("placement: clipped by the parent to %ldx%ld of %ldx%ld", vis.right - vis.left, vis.bottom - vis.top, w.right - w.left, w.bottom - w.top);
+}
 static const int ATTACH_ORDER[] = { 7, 1, 2, 3, 5 };
 static void attach_to_desktop(void) {
   HWND progman = FindWindowA("Progman", NULL);
@@ -362,18 +382,20 @@ static void attach_to_desktop(void) {
     HWND defview = FindWindowExA(progman, NULL, "SHELLDLL_DefView", NULL);
     if (!defview) { logmsg("attach %d: no SHELLDLL_DefView under Progman", cfg.attach); return; }
     SetParent(hwnd, defview); hostParent = defview;
-    SetWindowPos(hwnd, cfg.attach == 7 ? HWND_BOTTOM : HWND_TOP, g_monX, g_monY, scrW, scrH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    logmsg("attach %d: child of SHELLDLL_DefView %p", cfg.attach, (void *)defview); return;
+    POINT org = { g_monX, g_monY }; ScreenToClient(defview, &org);
+    SetWindowPos(hwnd, cfg.attach == 7 ? HWND_BOTTOM : HWND_TOP, org.x, org.y, scrW, scrH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    logmsg("attach %d: child of SHELLDLL_DefView %p", cfg.attach, (void *)defview);
+    report_placement(defview); return;
   }
   else if (cfg.attach == 6) { // diagnostic: ordinary topmost window
     SetWindowLongA(hwnd, GWL_STYLE, style);
-    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, scrW, scrH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    logmsg("attach 6: topmost diagnostic window"); return;
+    SetWindowPos(hwnd, HWND_TOPMOST, g_monX, g_monY, scrW, scrH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    logmsg("attach 6: topmost diagnostic window"); report_placement(NULL); return;
   }
   else if (cfg.attach == 5) { // plain top-level window kept at the bottom of the z-order
     SetWindowLongA(hwnd, GWL_STYLE, style); // keep WS_POPUP
-    SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, scrW, scrH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    logmsg("attach 5: top-level window at HWND_BOTTOM"); return;
+    SetWindowPos(hwnd, HWND_BOTTOM, g_monX, g_monY, scrW, scrH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    logmsg("attach 5: top-level window at HWND_BOTTOM"); report_placement(NULL); return;
   }
   else if (cfg.attach == 4) { // diagnostic: layered child of Progman ABOVE DefView
     SetWindowLongA(hwnd, GWL_EXSTYLE, GetWindowLongA(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED); SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
@@ -393,7 +415,10 @@ static void attach_to_desktop(void) {
     if (wallpaperW) SetWindowPos(wallpaperW, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     logmsg("attached under Progman (24H2 layout), defview %p, workerw %p", (void *)defview, (void *)wallpaperW);
   }
-  SetWindowPos(hwnd, NULL, 0, 0, scrW, scrH, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  { HWND par = GetParent(hwnd); POINT org = { g_monX, g_monY };
+    if (par) ScreenToClient(par, &org);
+    SetWindowPos(hwnd, NULL, org.x, org.y, scrW, scrH, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    report_placement(par); }
 }
 static void present(void) {
   double a = qnow();
