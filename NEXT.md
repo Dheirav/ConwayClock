@@ -128,6 +128,17 @@ Steps 1 and 2 are implemented on `main`; step 3 needs a Windows machine.
   `docs/HOW-IT-WORKS.md` has not been re-measured over a long run.
 - **At `zoom = 4` it buys nothing**: 2.31 ms against 2.40 ms. The watch view
   is a dense crop with little empty space. Expected, and the right way round.
+- **Exact intervals were tried and reverted, 2026-09-05.** One interval per
+  row bridges the gaps in a row; a bitmap of the occupied 8-column blocks does
+  not, and covers 14 % of the map against 33 %. Implemented in full and
+  measured against the current version, alternating builds over three rounds
+  to cancel machine load: resample 0.93 ms to 0.84 ms, but render 0.58 ms to
+  0.68 ms for the block bookkeeping -- setting bits per tile, the union with
+  the previous frame, and the row-pair union pass 2 needs. Total 1.51 ms
+  against 1.52 ms: a wash. Do not build it again without a cheaper way to
+  carry the blocks. A single measurement had suggested 0.78 against 1.24 ms;
+  that was machine load, not the change, and only the alternating A/B showed
+  it.
 - **The self-check was wrong at first and is worth not repeating.** It
   rendered one partial frame and then a whole-picture frame at the same
   generation, in a loop -- so every partial frame followed a full one, its
