@@ -14,7 +14,7 @@
 
 #define APP_NAME "Life Clock"
 #define APP_KEY "LifeClock"
-#define APP_VERSION "1.6"
+#define APP_VERSION "1.8"   // bump with the release tag; shown in Settings > Apps > Installed apps
 #define UNINST_KEY "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" APP_KEY
 
 int lc_make_shortcut(const char *target, const char *args, const char *workdir, const char *desc, const char *linkPath) {

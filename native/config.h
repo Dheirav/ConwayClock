@@ -14,8 +14,8 @@ struct LcConfig { int fps, batteryFps, view, gain, status, attach, monitor, pmMo
   int theme, dayStart, nightStart, dayGain, nightGain; double fadeSec; char dayPalette[16], nightPalette[16]; double vpos, hpos, size, afterglow; DWORD hot; DWORD bg, cells, cells2; int hasCells2; char palette[16]; const char *frame; };
 extern struct LcConfig cfg;
 void cfg_defaults(void);
-void apply_setting(const char *key, const char *val);
-void clamp_settings(void);
+int apply_setting(const char *key, const char *val);   // 0 = key not recognised
+int clamp_settings(void);                             // number of values pulled into range
 DWORD parse_hex_bgr(const char *s);
 void preset_colors(const char *name, DWORD *bg, DWORD *cells);
 #endif

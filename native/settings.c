@@ -32,6 +32,24 @@ static char *ini_get(const char *key, char *buf, size_t n, const char *dflt) {
   }
   fclose(f); return buf;
 }
+static void ini_remove(const char *key) {
+  FILE *f = fopen(iniPath, "rb"); if (!f) return;
+  fseek(f, 0, SEEK_END); size_t len = ftell(f); fseek(f, 0, SEEK_SET);
+  char *text = malloc(len + 1); if (fread(text, 1, len, f) != len) { fclose(f); free(text); return; } text[len] = 0; fclose(f);
+  char *out = malloc(len + 1); out[0] = 0; char *p = text;
+  while (*p) {
+    char *nl = strchr(p, '\n'); size_t l = nl ? (size_t)(nl - p + 1) : strlen(p);
+    char line[256]; size_t cl = l < 255 ? l : 255; memcpy(line, p, cl); line[cl] = 0;
+    char *q = line; while (*q == ' ' || *q == '\t') q++;
+    char *eq = strchr(q, '='); int match = 0;
+    if (*q != ';' && *q != '#' && eq) { char k[64]; size_t kl = eq - q;
+      if (kl < 63) { memcpy(k, q, kl); k[kl] = 0; char *e = k + strlen(k); while (e > k && (e[-1] == ' ' || e[-1] == '\t')) *--e = 0; match = !strcmp(k, key); } }
+    if (!match) strncat(out, p, l);
+    p += l;
+  }
+  f = fopen(iniPath, "wb"); if (f) { fwrite(out, 1, strlen(out), f); fclose(f); }
+  free(text); free(out);
+}
 static void ini_set(const char *key, const char *val) {
   char *text = NULL; size_t len = 0; FILE *f = fopen(iniPath, "rb");
   if (f) { fseek(f, 0, SEEK_END); len = ftell(f); fseek(f, 0, SEEK_SET); text = malloc(len + 1); fread(text, 1, len, f); text[len] = 0; fclose(f); } else { text = calloc(1, 1); }
@@ -147,7 +165,15 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
       if (id == ID_CLOSE) { DestroyWindow(h); return 0; }
       if (id == ID_OPENINI) { ShellExecuteA(NULL, "open", iniPath, NULL, exeDir, SW_SHOWNORMAL); return 0; }
       if (id == ID_WATCH) { ShellExecuteA(NULL, "open", exePath, "--fullscreen 1", exeDir, SW_SHOWNORMAL); return 0; }
-      if (id == ID_DEFAULTS) { for (int i = 0; i < NCTL; i++) ini_set(ctls[i].key, ctls[i].dflt); load_into_controls(); return 0; }
+      if (id == ID_DEFAULTS) {
+        // bg and cells are absent from the shipped file, so writing their
+        // defaults appends them *after* palette; load_ini applies in file order
+        // and last wins, which would leave the palette drop-down doing nothing.
+        // Their default is "whatever the palette says", which is to have no line.
+        for (int i = 0; i < NCTL; i++) {
+          if (!strcmp(ctls[i].key, "bg") || !strcmp(ctls[i].key, "cells")) ini_remove(ctls[i].key);
+          else ini_set(ctls[i].key, ctls[i].dflt); }
+        load_into_controls(); return 0; }
       if (id == ID_STARTUP) { ShellExecuteA(NULL, "open", exePath, SendMessageA(startupChk, BM_GETCHECK, 0, 0) == BST_CHECKED ? "--install-startup" : "--uninstall-startup", exeDir, SW_HIDE); return 0; }
       for (int i = 0; i < NCTL; i++) if (ctls[i].id == id) {
         if (ctls[i].type == T_COMBO && code == CBN_SELCHANGE) save_control(&ctls[i]);

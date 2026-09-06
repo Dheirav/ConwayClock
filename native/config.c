@@ -12,7 +12,7 @@ void preset_colors(const char *name, DWORD *bg, DWORD *cells) {
   for (size_t i = 0; i < sizeof PRESETS / sizeof PRESETS[0]; i++) if (!strcmp(name, PRESETS[i][0])) { *bg = parse_hex_bgr(PRESETS[i][1]); *cells = parse_hex_bgr(PRESETS[i][2]); return; }
   *cells = parse_hex_bgr(name);
 }
-void apply_setting(const char *key, const char *val) {
+int apply_setting(const char *key, const char *val) {
   if (!strcmp(key, "fps")) cfg.fps = atoi(val);
   else if (!strcmp(key, "battery_fps")) cfg.batteryFps = atoi(val);
   else if (!strcmp(key, "view")) cfg.view = !strcmp(val, "display");
@@ -45,19 +45,25 @@ void apply_setting(const char *key, const char *val) {
   else if (!strcmp(key, "bg")) cfg.bg = parse_hex_bgr(val);
   else if (!strcmp(key, "cells")) cfg.cells = parse_hex_bgr(val);
   else if (!strcmp(key, "cells2")) { if (val[0] && strcmp(val, "none")) { cfg.cells2 = parse_hex_bgr(val); cfg.hasCells2 = 1; } else cfg.hasCells2 = 0; }
+  else return 0;   // not a key we know
+  return 1;
 }
-void clamp_settings(void) {
-  if (cfg.fps != 3 && cfg.fps != 6 && cfg.fps != 12 && cfg.fps != 24) cfg.fps = 6;
-  if (cfg.batteryFps != 1 && cfg.batteryFps != 3 && cfg.batteryFps != 6 && cfg.batteryFps != 12 && cfg.batteryFps != 24) cfg.batteryFps = 3;
-  if (cfg.gain < 1) cfg.gain = 1; if (cfg.gain > 255) cfg.gain = 255;
-  if (cfg.dayStart < 0 || cfg.dayStart > 23) cfg.dayStart = 7;
-  if (cfg.nightStart < 0 || cfg.nightStart > 23) cfg.nightStart = 19;
-  if (cfg.dayGain < 1) cfg.dayGain = 1; if (cfg.dayGain > 255) cfg.dayGain = 255;
-  if (cfg.nightGain < 1) cfg.nightGain = 1; if (cfg.nightGain > 255) cfg.nightGain = 255;
-  if (cfg.fadeSec < 0) cfg.fadeSec = 0; if (cfg.fadeSec > 30) cfg.fadeSec = 30;
-  if (cfg.afterglow < 0) cfg.afterglow = 0; if (cfg.afterglow > 0.95) cfg.afterglow = 0.95;
-  if (cfg.zoom != 0 && cfg.zoom != 1 && cfg.zoom != 2 && cfg.zoom != 4 && cfg.zoom != 8 && cfg.zoom != 16) cfg.zoom = 0;
-  if (cfg.size < 0.3) cfg.size = 0.3; if (cfg.size > 2.0) cfg.size = 2.0;
-  if (cfg.hpos < 0.0) cfg.hpos = 0.0; if (cfg.hpos > 1.0) cfg.hpos = 1.0;
-  if (cfg.vpos < 0.2) cfg.vpos = 0.2; if (cfg.vpos > 0.9) cfg.vpos = 0.9;
+int clamp_settings(void) {
+  int n = 0;
+  #define CLAMP(cond, fix) do { if (cond) { fix; n++; } } while (0)
+  CLAMP(cfg.fps != 3 && cfg.fps != 6 && cfg.fps != 12 && cfg.fps != 24, cfg.fps = 6);
+  CLAMP(cfg.batteryFps != 1 && cfg.batteryFps != 3 && cfg.batteryFps != 6 && cfg.batteryFps != 12 && cfg.batteryFps != 24, cfg.batteryFps = 3);
+  CLAMP(cfg.gain < 1, cfg.gain = 1); CLAMP(cfg.gain > 255, cfg.gain = 255);
+  CLAMP(cfg.dayStart < 0 || cfg.dayStart > 23, cfg.dayStart = 7);
+  CLAMP(cfg.nightStart < 0 || cfg.nightStart > 23, cfg.nightStart = 19);
+  CLAMP(cfg.dayGain < 1, cfg.dayGain = 1); CLAMP(cfg.dayGain > 255, cfg.dayGain = 255);
+  CLAMP(cfg.nightGain < 1, cfg.nightGain = 1); CLAMP(cfg.nightGain > 255, cfg.nightGain = 255);
+  CLAMP(cfg.fadeSec < 0, cfg.fadeSec = 0); CLAMP(cfg.fadeSec > 30, cfg.fadeSec = 30);
+  CLAMP(cfg.afterglow < 0, cfg.afterglow = 0); CLAMP(cfg.afterglow > 0.95, cfg.afterglow = 0.95);
+  CLAMP(cfg.zoom != 0 && cfg.zoom != 1 && cfg.zoom != 2 && cfg.zoom != 4 && cfg.zoom != 8 && cfg.zoom != 16, cfg.zoom = 0);
+  CLAMP(cfg.size < 0.3, cfg.size = 0.3); CLAMP(cfg.size > 2.0, cfg.size = 2.0);
+  CLAMP(cfg.hpos < 0.0, cfg.hpos = 0.0); CLAMP(cfg.hpos > 1.0, cfg.hpos = 1.0);
+  CLAMP(cfg.vpos < 0.2, cfg.vpos = 0.2); CLAMP(cfg.vpos > 0.9, cfg.vpos = 0.9);
+  #undef CLAMP
+  return n;
 }

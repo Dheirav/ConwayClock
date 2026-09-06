@@ -246,6 +246,12 @@ static int effect_decay_frames(void) {
 }
 static void render(void) {
   double a = qnow();
+  // The letterbox outside the machine's rectangle is painted once and then left
+  // alone, on the premise that it never changes -- which a day/night fade breaks,
+  // because the background colour itself moves. A whole-picture frame repaints
+  // it, and must also force present() to blit the whole window rather than just
+  // the machine's rectangle.
+  if (fullRepaint && pixels) { uint32_t bg = lut[0]; size_t n = (size_t)scrW * scrH; for (size_t i = 0; i < n; i++) pixels[i] = bg; dibPainted = 0; }
   // Clear last frame's ranges rather than the whole map, then fill from the
   // engine, which reports what it touched. fullRepaint forces the *screen* to be
   // redrawn whole; it deliberately does not widen the spans, because dens is
@@ -728,6 +734,8 @@ static const char *INI_TEMPLATE =
 "\n"
 "; Small stats line in the corner: 0 or 1.\n"
 "status = 0\n";
+// What the last load could not make sense of, reported once by load_settings.
+static int unknownKeys; static char unknownList[256];
 static void load_ini(void) {
   FILE *f = fopen(iniPath, "r");
   if (!f) { f = fopen(iniPath, "w"); if (f) { fputs(INI_TEMPLATE, f); fclose(f); logmsg("wrote default %s", iniPath); } return; }
@@ -738,7 +746,7 @@ static void load_ini(void) {
     char *e = k + strlen(k); while (e > k && (e[-1] == ' ' || e[-1] == '\t')) *--e = 0;
     while (*v == ' ' || *v == '\t') v++; e = v + strlen(v); while (e > v && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
     char *c = strchr(v, ';'); if (c) { *c = 0; e = v + strlen(v); while (e > v && e[-1] == ' ') *--e = 0; }
-    apply_setting(k, v);
+    if (!apply_setting(k, v)) { unknownKeys++; size_t ul = strlen(unknownList); snprintf(unknownList + ul, sizeof unknownList - ul, "%s%s", ul ? ", " : "", k); }
   }
   fclose(f);
 }
@@ -750,7 +758,26 @@ static int ini_changed(void) {
   WIN32_FILE_ATTRIBUTE_DATA a; if (!GetFileAttributesExA(iniPath, GetFileExInfoStandard, &a)) return 0;
   if (CompareFileTime(&a.ftLastWriteTime, &iniTime) == 0) return 0; iniTime = a.ftLastWriteTime; return 1;
 }
-static void load_settings(void) { cfg_defaults(); load_ini(); apply_args(); clamp_settings(); theme_targets(); }
+static void load_settings(void) {
+  cfg_defaults(); unknownKeys = 0; unknownList[0] = 0;
+  load_ini(); apply_args();
+  int clamped = clamp_settings(); theme_targets();
+  // Silence was the main source of "I changed it and nothing happened": an
+  // unrecognised key was ignored and an out-of-range value quietly pulled in.
+  if (unknownKeys) logmsg("ini: %d key%s not recognised and ignored: %s", unknownKeys, unknownKeys == 1 ? "" : "s", unknownList);
+  if (clamped) logmsg("ini: %d value%s were out of range and were clamped", clamped, clamped == 1 ? "" : "s");
+}
+// A live reload starts from cfg_defaults(), which zeroes the whole struct --
+// including the mode flags, which come from the /s switch rather than the file,
+// and the two values derived after the first load. Without this the screensaver
+// stops answering the keyboard mid-run, because that is gated on cfg.screensaver.
+static void reload_settings(void) {
+  int fs = cfg.fullscreen, ss = cfg.screensaver; const char *fr = cfg.frame;
+  load_settings();
+  cfg.fullscreen = fs; cfg.screensaver = ss; cfg.frame = fr;
+  if (cfg.fullscreen && !cfg.zoom) cfg.zoom = 4;
+  if (cfg.tour < 0) cfg.tour = cfg.screensaver;
+}
 
 static void pick_monitor(int *mx, int *my, int *w, int *h) {
   RECT mons[8]; int nm = 0; BOOL CALLBACK monproc(HMONITOR, HDC, LPRECT, LPARAM);
@@ -977,7 +1004,7 @@ int main(int argc, char **argv) {
       hostParent = NULL; attach_to_desktop(); dibPainted = 0; present(); lastOccl = now; attachVerified = 0; attachTry = 0; visibleSince = 0; continue;
     }
     if (now - lastIni > 2000) { lastIni = now;
-      if (ini_changed()) { int oldColon = cfg.colonMode; load_settings(); palette_snap(); setup_view(scrW, scrH); dibPainted = 0; if (cfg.colonMode != oldColon) load_snapshot(current_minute()); render(); present(); logmsg("settings reloaded: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain); }
+      if (ini_changed()) { int oldColon = cfg.colonMode; reload_settings(); palette_snap(); setup_view(scrW, scrH); dibPainted = 0; if (cfg.colonMode != oldColon) load_snapshot(current_minute()); render(); present(); logmsg("settings reloaded: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain); }
       theme_targets();
       SYSTEM_POWER_STATUS ps; GetSystemPowerStatus(&ps); onBattery = (ps.ACLineStatus == 0);
       int f = onBattery ? cfg.batteryFps : cfg.fps; stepGens = GPS / f; frameMs = 1000 / f; }

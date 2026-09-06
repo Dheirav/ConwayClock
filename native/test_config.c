@@ -89,6 +89,15 @@ int main(void) {
   cfg_defaults(); set("nonsense", "42"); set("fps", "12"); clamp_settings();
   check("unknown key ignored", cfg.fps, 12);
 
+  // apply_setting and clamp_settings report what they could not use, so the
+  // program can say so in the log instead of failing silently
+  check("known key reports 1", apply_setting("fps", "6"), 1);
+  check("unknown key reports 0", apply_setting("nonsense", "42"), 0);
+  check("unknown key reports 0 (empty)", apply_setting("", ""), 0);
+  cfg_defaults(); check("nothing to clamp reports 0", clamp_settings(), 0);
+  cfg_defaults(); set("fps", "7"); set("gain", "9999"); set("vpos", "17");
+  check("three bad values report 3", clamp_settings(), 3);
+
   printf("settings: %s\n", fails ? "FAILURES ABOVE" : "all checks passed");
   return fails ? 1 : 0;
 }
