@@ -499,11 +499,20 @@ static void present(void) {
 }
 static volatile int paused_lock = 0, paused_display = 0, paused_manual = 0, displayChanged = 0;
 static void create_dib(int W, int H) {
-  if (dib) { DeleteObject(dib); dib = NULL; }
   if (!memdc) { HDC sdc = GetDC(NULL); memdc = CreateCompatibleDC(sdc); ReleaseDC(NULL, sdc); }
   BITMAPINFO bi = { 0 }; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
-  dib = CreateDIBSection(memdc, &bi, DIB_RGB_COLORS, &dibBits, NULL, 0); SelectObject(memdc, dib);
-  if (pixels && pixels != (uint32_t *)dibBits) free(pixels); pixels = (uint32_t *)dibBits;
+  void *bits = NULL; HBITMAP nb = CreateDIBSection(memdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+  if (!nb || !bits) { logmsg("create_dib: CreateDIBSection %dx%d failed, err %lu; keeping the old bitmap", W, H, GetLastError()); if (nb) DeleteObject(nb); return; }
+  // Select the new bitmap first: the old one cannot be deleted while it is still
+  // selected into the DC, and DeleteObject would silently leak it and its bits.
+  SelectObject(memdc, nb);
+  if (dib) DeleteObject(dib);
+  // pixels aliases the DIB's own bits once there is a DIB, and that memory
+  // belongs to GDI. Only the heap buffer setup_view allocates before the first
+  // DIB exists may be freed -- compare against the *old* dibBits to tell them
+  // apart, which is why the new bits land in a local until now.
+  if (pixels && pixels != (uint32_t *)dibBits) free(pixels);
+  dib = nb; dibBits = bits; pixels = (uint32_t *)bits;
   uint32_t bgpx = lut[0]; for (size_t i = 0; i < (size_t)W * H; i++) pixels[i] = bgpx; dibPainted = 0; fullRepaint = 1;
 }
 #define WM_TRAY (WM_APP + 1)
@@ -611,7 +620,9 @@ static BOOL CALLBACK occl_cb(HWND h, LPARAM lp) {
   RECT box; return GetRgnBox(occl_region, &box) != NULLREGION;
 }
 static int desktop_covered(void) {
-  occl_screen.left = 0; occl_screen.top = 0; occl_screen.right = scrW; occl_screen.bottom = scrH;
+  // Virtual-screen coordinates, like the window rectangles subtracted from it:
+  // with monitor = 1 the question is whether *that* monitor's desktop is covered.
+  occl_screen.left = g_monX; occl_screen.top = g_monY; occl_screen.right = g_monX + scrW; occl_screen.bottom = g_monY + scrH;
   occl_region = CreateRectRgnIndirect(&occl_screen); occl_dbg[0] = 0; occl_dbg_n = 0; EnumWindows(occl_cb, 0);
   RECT box; int empty = GetRgnBox(occl_region, &box) == NULLREGION; DeleteObject(occl_region);
   QUERY_USER_NOTIFICATION_STATE q; if (SUCCEEDED(SHQueryUserNotificationState(&q)) && (q == QUNS_RUNNING_D3D_FULL_SCREEN || q == QUNS_BUSY)) return 1;
@@ -751,6 +762,19 @@ static void pick_monitor(int *mx, int *my, int *w, int *h) {
 }
 BOOL CALLBACK monproc(HMONITOR h, HDC dc, LPRECT r, LPARAM lp) { (void)dc; (void)r; struct { RECT *r; int *n; HMONITOR prim; } *ctx = (void *)lp; if (h == ctx->prim || *ctx->n >= 8) return TRUE; MONITORINFO mi = { sizeof mi }; GetMonitorInfoA(h, &mi); ctx->r[(*ctx->n)++] = mi.rcMonitor; return TRUE; }
 static volatile int quitRequested;
+// Session lock and display-off arrive as messages to a specific window, so a
+// recreated window has to ask again -- otherwise paused_lock and paused_display
+// stop being updated, and a display-off that happened first sticks on forever.
+static HPOWERNOTIFY powerNotify;
+static void unregister_notifications(void) {
+  if (hwnd) WTSUnRegisterSessionNotification(hwnd);
+  if (powerNotify) { UnregisterPowerSettingNotification(powerNotify); powerNotify = NULL; }
+}
+static void register_notifications(void) {
+  WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+  GUID g = { 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 } }; /* GUID_CONSOLE_DISPLAY_STATE */
+  powerNotify = RegisterPowerSettingNotification(hwnd, &g, DEVICE_NOTIFY_WINDOW_HANDLE);
+}
 static void pump(void) { MSG m; while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) { if (m.message == WM_QUIT) quitRequested = 1; TranslateMessage(&m); DispatchMessageA(&m); } }
 
 int main(int argc, char **argv) {
@@ -927,8 +951,7 @@ int main(int argc, char **argv) {
   present();
   { typedef UINT (WINAPI *GDFW)(HWND); GDFW gdfw = (GDFW)GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForWindow"); RECT wr; GetWindowRect(hwnd, &wr);
     logmsg("window: dpi %u, rect (%ld,%ld)-(%ld,%ld), parent %p", gdfw ? gdfw(hwnd) : 0, wr.left, wr.top, wr.right, wr.bottom, (void *)GetParent(hwnd)); }
-  WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
-  { GUID g = { 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 } }; /* GUID_CONSOLE_DISPLAY_STATE */ RegisterPowerSettingNotification(hwnd, &g, DEVICE_NOTIFY_WINDOW_HANDLE); }
+  register_notifications();
 
   // Sync in slices, presenting the frozen snapshot meanwhile.
   int64_t target = target_generation();
@@ -947,9 +970,11 @@ int main(int argc, char **argv) {
       // Explorer is restarting: wait until it has rebuilt the desktop (Progman with its shell view) before re-attaching.
       HWND pm = FindWindowA("Progman", NULL); if (!pm || !FindWindowExA(pm, NULL, "SHELLDLL_DefView", NULL)) { static DWORD lastWait; if (now - lastWait > 5000) { lastWait = now; logmsg("desktop window gone; waiting for Explorer to rebuild the desktop"); } lastOccl = now; continue; }
       logmsg("desktop window gone (Explorer restart?): recreating");
+      unregister_notifications();
       if (IsWindow(hwnd)) DestroyWindow(hwnd);
-      hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "LifeClockWallpaper", "Life Clock", WS_POPUP, 0, 0, scrW, scrH, NULL, NULL, GetModuleHandleA(NULL), NULL);
-      hostParent = NULL; attach_to_desktop(); present(); lastOccl = now; attachVerified = 0; attachTry = 0; visibleSince = 0; continue;
+      hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "LifeClockWallpaper", "Life Clock", WS_POPUP, g_monX, g_monY, scrW, scrH, NULL, NULL, GetModuleHandleA(NULL), NULL);
+      register_notifications();
+      hostParent = NULL; attach_to_desktop(); dibPainted = 0; present(); lastOccl = now; attachVerified = 0; attachTry = 0; visibleSince = 0; continue;
     }
     if (now - lastIni > 2000) { lastIni = now;
       if (ini_changed()) { int oldColon = cfg.colonMode; load_settings(); palette_snap(); setup_view(scrW, scrH); dibPainted = 0; if (cfg.colonMode != oldColon) load_snapshot(current_minute()); render(); present(); logmsg("settings reloaded: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain); }
@@ -960,7 +985,11 @@ int main(int argc, char **argv) {
       int p = paused_lock || paused_display || paused_manual || (!cfg.fullscreen && desktop_covered()); if (p != paused) { paused = p; if (paused) logmsg("paused (lock %d display-off %d; windows subtracted:%s)", paused_lock, paused_display, occl_dbg); else logmsg("resumed"); } }
     if (displayChanged) { displayChanged = 0; int mx, my, w, h; pick_monitor(&mx, &my, &w, &h);
       if (mx != g_monX || my != g_monY || w != scrW || h != scrH) { logmsg("display changed: %dx%d at (%d,%d)", w, h, mx, my); g_monX = mx; g_monY = my; scrW = w; scrH = h;
-        create_dib(w, h); SetWindowPos(hwnd, NULL, mx, my, w, h, SWP_NOZORDER | SWP_NOACTIVATE); setup_view(w, h); render(); present(); } }
+        create_dib(w, h);
+        { POINT org = { mx, my }; HWND par = GetParent(hwnd);   // a child is positioned in its parent's client space
+          if (par) ScreenToClient(par, &org);
+          SetWindowPos(hwnd, NULL, org.x, org.y, w, h, SWP_NOZORDER | SWP_NOACTIVATE); }
+        setup_view(w, h); render(); present(); } }
     if (paused) { visibleSince = 0; continue; }
     if (!visibleSince) visibleSince = now;
     if (recheckAt && now >= recheckAt) { recheckAt = 0; attachVerified = 0; attachTry = 0; }
@@ -971,11 +1000,11 @@ int main(int argc, char **argv) {
       else { int next = -1; while (attachTry < (int)(sizeof ATTACH_ORDER / sizeof ATTACH_ORDER[0])) { int c = ATTACH_ORDER[attachTry++]; if (c != cfg.attach) { next = c; break; } }
         if (next < 0) { // nothing verified: go back to the default and try the whole cycle again in five minutes
           attachVerified = 1; attachTry = 0; logmsg("no attachment strategy verified; returning to 7, will re-check in 5 min");
-          if (cfg.attach != 7) { cfg.attach = 7; DestroyWindow(hwnd); hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "LifeClockWallpaper", "Life Clock", WS_POPUP, g_monX, g_monY, scrW, scrH, NULL, NULL, GetModuleHandleA(NULL), NULL); hostParent = NULL; attach_to_desktop(); dibPainted = 0; present(); }
+          if (cfg.attach != 7) { cfg.attach = 7; unregister_notifications(); DestroyWindow(hwnd); hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "LifeClockWallpaper", "Life Clock", WS_POPUP, g_monX, g_monY, scrW, scrH, NULL, NULL, GetModuleHandleA(NULL), NULL); register_notifications(); hostParent = NULL; attach_to_desktop(); dibPainted = 0; present(); }
           recheckAt = now + 300000; }
         else { logmsg("not visible with strategy %d; trying %d", cfg.attach, next); cfg.attach = next;
-          DestroyWindow(hwnd); hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "LifeClockWallpaper", "Life Clock", WS_POPUP, g_monX, g_monY, scrW, scrH, NULL, NULL, GetModuleHandleA(NULL), NULL);
-          hostParent = NULL; attach_to_desktop(); dibPainted = 0; present(); visibleSince = now; continue; } }
+          unregister_notifications(); DestroyWindow(hwnd); hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "LifeClockWallpaper", "Life Clock", WS_POPUP, g_monX, g_monY, scrW, scrH, NULL, NULL, GetModuleHandleA(NULL), NULL);
+          register_notifications(); hostParent = NULL; attach_to_desktop(); dibPainted = 0; present(); visibleSince = now; continue; } }
     }
     LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
     target = target_generation(); int64_t behind = target - uni.generation;
