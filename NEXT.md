@@ -198,18 +198,27 @@ Wi-Fi Direct groups are not permitted. Tailscale was ruled out by stopping
 the service. Testing needs a display that does not depend on the Wi-Fi
 channel plan.
 
-## 3. The screensaver preview is blank
+## 3. The screensaver preview
 
-`native/main.c:664` — `if (scrPreview) return 0;`.
+**Done 2026-09-06.**
 
-Windows passes `/p <hwnd>` and expects the screensaver to draw into that
-child window. The program parses `/p`, ignores the handle that follows, and
-exits, so the small monitor in the screensaver dialog stays black.
+`main.c` parsed `/p`, threw away the window handle Windows passes after it,
+and exited, so the little monitor in the screensaver dialog stayed black. It
+now takes that handle, creates a plain `WS_CHILD` window inside it, syncs to
+the current time and redraws at 6 fps until the dialog goes away. The
+preview is not the wallpaper, so it does not take the single-instance lock.
 
-Small, visible in a dialog people actually open, and the machinery to
-render into an arbitrary HWND already exists — `--frame` renders headless
-into a memory DIB (`native/main.c:713`) and could blit into the preview
-handle at a low frame rate.
+The catch was DPI. The dialog need not share the program's per-monitor
+awareness, so the client rect read from the parent and the client rect of the
+window actually created can differ -- measured, 405x276 asked for against
+506x345 received. The preview therefore re-reads its own client rect after
+creation and re-runs `setup_view` when they disagree. Without that it painted
+a 405x276 corner of a 506x345 window: 19.8 % of sampled pixels differed from
+the background against 80.0 % once fitted.
+
+Tested by creating a host window, passing its handle as `/p <hwnd>` exactly
+as the dialog does, and checking a `LifeClockPreview` child appears and is
+painted.
 
 ## 4. CI and the Windows code
 

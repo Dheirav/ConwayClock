@@ -708,12 +708,17 @@ static void pump(void) { MSG m; while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) 
 
 int main(int argc, char **argv) {
   g_argc = argc; g_argv = argv;
-  int scrCfg = 0, scrPreview = 0, scrRun = 0;
+  int scrCfg = 0, scrPreview = 0, scrRun = 0; HWND previewParent = NULL;
   for (int i = 1; i < argc; i++) { // Windows screensaver conventions: /s run, /c configure, /p preview
     const char *a = argv[i]; if ((a[0] == '/' || a[0] == '-') && (a[1] == 's' || a[1] == 'S') && (a[2] == 0 || a[2] == ':')) scrRun = 1;
     if ((a[0] == '/' || a[0] == '-') && (a[1] == 'c' || a[1] == 'C') && (a[2] == 0 || a[2] == ':')) scrCfg = 1;
-    if ((a[0] == '/' || a[0] == '-') && (a[1] == 'p' || a[1] == 'P') && (a[2] == 0 || a[2] == ':')) scrPreview = 1; }
-  if (scrPreview) return 0;
+    if ((a[0] == '/' || a[0] == '-') && (a[1] == 'p' || a[1] == 'P') && (a[2] == 0 || a[2] == ':')) {
+      // /p <hwnd> or /p:<hwnd>: the dialog's little monitor, to draw into.
+      scrPreview = 1;
+      const char *h = a[2] == ':' ? a + 3 : (i + 1 < argc ? argv[i + 1] : NULL);
+      if (h && *h) previewParent = (HWND)(uintptr_t)strtoull(h, NULL, 0);
+    } }
+  if (scrPreview && !previewParent) return 0;   // asked to preview into nothing
   for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--setup") || !strcmp(argv[i], "--install") || !strcmp(argv[i], "--uninstall")) {
     GetModuleFileNameA(NULL, exePath, MAX_PATH); strcpy(exeDir, exePath); char *sl = strrchr(exeDir, '\\'); if (sl) sl[1] = 0;
     if (!strcmp(argv[i], "--setup")) return lc_setup_gui(exePath, exeDir);
@@ -746,7 +751,7 @@ int main(int argc, char **argv) {
   logmsg("start: fps %d/%d view %d size %.2f pos %.2f,%.2f palette %s gain %d frame %s", cfg.fps, cfg.batteryFps, cfg.view, cfg.size, cfg.hpos, cfg.vpos, cfg.palette, cfg.gain, cfg.frame ? cfg.frame : "-");
 
   HANDLE mutex = NULL;
-  if (!cfg.frame) { mutex = CreateMutexA(NULL, TRUE, cfg.fullscreen ? "LifeClockFullscreen" : "LifeClockWallpaper"); if (GetLastError() == ERROR_ALREADY_EXISTS) { logmsg("already running"); return 2; } }
+  if (!cfg.frame && !previewParent) { mutex = CreateMutexA(NULL, TRUE, cfg.fullscreen ? "LifeClockFullscreen" : "LifeClockWallpaper"); if (GetLastError() == ERROR_ALREADY_EXISTS) { logmsg("already running"); return 2; } }
   HANDLE quitEv = CreateEventA(NULL, TRUE, FALSE, cfg.fullscreen ? "LifeClockFullscreenQuit" : "LifeClockWallpaperQuit");
   if (cfg.fullscreen && !cfg.zoom) cfg.zoom = 4;   // watch mode: gliders visible by default
 
@@ -754,6 +759,13 @@ int main(int argc, char **argv) {
   BOOL dpiok = setctx ? setctx((HANDLE)-4 /* PER_MONITOR_AWARE_V2 */) : SetProcessDPIAware();
   DWORD dpierr = GetLastError();
   int W, H, monX, monY; pick_monitor(&monX, &monY, &W, &H); g_monX = monX; g_monY = monY;
+  if (previewParent) {
+    if (!IsWindow(previewParent)) { logmsg("preview: %p is not a window", (void *)previewParent); return 0; }
+    RECT pr; GetClientRect(previewParent, &pr); W = pr.right; H = pr.bottom;
+    if (W < 8 || H < 8) { logmsg("preview: parent client area is %dx%d", W, H); return 0; }
+    g_monX = g_monY = monX = monY = 0;
+    logmsg("preview: drawing into %p at %dx%d", (void *)previewParent, W, H);
+  }
   { DEVMODEA dm = { 0 }; dm.dmSize = sizeof dm; EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm);
     typedef UINT (WINAPI *GDFS)(void); GDFS gdfs = (GDFS)GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForSystem");
     logmsg("dpi: awareness call ok=%d err=%lu, metrics %dx%d, display mode %lux%lu, system dpi %u", dpiok, dpierr, W, H, dm.dmPelsWidth, dm.dmPelsHeight, gdfs ? gdfs() : 0); }
@@ -805,6 +817,46 @@ int main(int argc, char **argv) {
         if (cfg.tour > 0 && cfg.zoom) { double cx, cy; tour_center(i / 6.0, &cx, &cy); set_center(cx, cy); }
         hl_advance(&uni, cfg.frameStep > 0 ? cfg.frameStep : 32); render(); GdiFlush(); write_bmp(fn); } }
     else write_bmp(cfg.frame); HlStats s = hl_stats(); logmsg("frame written: %s; nodes %d memo %u tables %.0f MB", cfg.frame, s.nodes, s.memo, s.bytes / 1e6); return 0;
+  }
+
+  if (previewParent) {
+    // The screensaver dialog's preview. A plain child of the handle Windows
+    // gave us, redrawn a few times a second until the dialog goes away; the
+    // process is killed outright when the user picks another screensaver, so
+    // there is nothing to tidy up on the way out.
+    WNDCLASSA pc = { 0 }; pc.lpfnWndProc = DefWindowProcA; pc.hInstance = GetModuleHandleA(NULL); pc.lpszClassName = "LifeClockPreview";
+    RegisterClassA(&pc);
+    hwnd = CreateWindowExA(0, pc.lpszClassName, "", WS_CHILD | WS_VISIBLE, 0, 0, W, H, previewParent, NULL, pc.hInstance, NULL);
+    if (!hwnd) { logmsg("preview: CreateWindow failed, err %lu", GetLastError()); return 0; }
+    { // The dialog need not share our DPI awareness, so the window we asked for
+      // and the window we got can differ; fit to what we actually got.
+      RECT cr; GetClientRect(hwnd, &cr);
+      if (cr.right != W || cr.bottom != H) {
+        logmsg("preview: asked for %dx%d, got %ldx%ld; re-fitting", W, H, cr.right, cr.bottom);
+        W = cr.right; H = cr.bottom;
+        if (W < 8 || H < 8) return 0;
+        setup_view(W, H);
+      } }
+    create_dib(W, H);
+    int64_t target = target_generation();
+    while (target - uni.generation >= GPS) {
+      if (!IsWindow(previewParent)) return 0;                 // dialog closed mid-sync
+      int64_t step = target - uni.generation; if (step > PERIOD) step = PERIOD;
+      hl_advance(&uni, step); target = target_generation();
+    }
+    QueryPerformanceCounter(&t1); logmsg("preview: synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
+    render(); present();
+    const int previewFps = 6, stepGens = GPS / previewFps;
+    while (IsWindow(previewParent) && IsWindow(hwnd)) {
+      MSG m; while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageA(&m); }
+      Sleep(1000 / previewFps);
+      int64_t behind = target_generation() - uni.generation;
+      if (behind < -PERIOD || behind > 30 * PERIOD) { load_snapshot(current_minute()); continue; }
+      int n = 0; while (behind >= stepGens && n < 8) { hl_advance(&uni, stepGens); behind -= stepGens; n++; }
+      if (n) { render(); present(); }
+    }
+    logmsg("preview: parent gone");
+    return 0;
   }
 
   WNDCLASSA wc = { 0 }; wc.lpfnWndProc = wndproc; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "LifeClockWallpaper"; wc.hbrBackground = NULL; wc.hIcon = LoadIconA(wc.hInstance, MAKEINTRESOURCEA(1)); RegisterClassA(&wc);

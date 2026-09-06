@@ -43,7 +43,8 @@ The same program is a Windows screensaver. Copy `life-clock.exe` to
 choose Install, or put it in `C:\Windows\System32` and pick it in
 Settings, Personalisation, Lock screen, Screen saver settings. It runs the
 watch view at 1/4 zoom, touring the machine, and exits on mouse movement
-or a key. "Settings"
+or a key. The dialog's small preview monitor shows the machine too, synced
+to the current time like everything else. "Settings"
 in that dialog opens the settings window.
 
 ## Tray icon
