@@ -161,9 +161,16 @@ with the desktop visible, process CPU sampled over 42 s:
 
 | Setting | CPU, one core | Per frame | Memory |
 |---|---|---|---|
-| 6 fps | 3.8 to 4.2 % | render 0.6 to 1.0 ms, resample 3.2 to 3.5 ms, blit 0.9 to 1.0 ms | 97 MB working set |
+| 6 fps, before the partial repaint | 3.8 to 4.2 % | render 0.6 to 1.0 ms, resample 3.2 to 3.5 ms, blit 0.9 to 1.0 ms | 97 MB working set |
+| 6 fps, after | **3.2 % median**, 2.5 to 3.7 typical | render 0.6 ms, resample 1.4 ms, blit 0.7 ms | 129 MB working set |
 | 3 fps | about half | same per frame | same |
 | Desktop covered, locked or display off | 0 % | no frames | same |
+
+The 6 fps figures after the change are the median of 49 steady minutes on
+the default configuration, taken from the per-minute log line; minutes with
+a short frame count or a catch-up after a pause are excluded, since those
+measure the engine rather than the drawing. Memory moves with the engine's
+node tables between collections and is not a fixed figure.
 
 GPU: none measurable; the program draws on the CPU into a bitmap that
 Windows composites like a static wallpaper. For comparison, the same clock

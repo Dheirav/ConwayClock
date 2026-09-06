@@ -37,8 +37,8 @@ a new generation lands.
    (a window at 1/4 zoom where you can see the gliders), Start with Windows
    and Quit. Renamed to `.scr` it is a screensaver that tours the machine.
 
-Cost with the desktop visible: about 4 % of one core at the default 6 fps,
-97 MB of memory, no GPU. Nothing while a window covers the desktop.
+Cost with the desktop visible: about 3 % of one core at the default 6 fps,
+130 MB of memory, no GPU. Nothing while a window covers the desktop.
 
 ## Documentation
 
