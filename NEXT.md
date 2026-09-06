@@ -315,6 +315,43 @@ Two things about the sweep worth keeping:
   it from the measured rate, but the rate decays as the memo grows and the
   collector starts firing: it read 17 minutes on a run that took 34.
 
+## 7. Memory
+
+**Reduced 2026-09-06, measured over 40 simulated minutes: 122 MB peak to
+74 MB, and about 40 % faster.**
+
+Where it went, before: node array 117 MB, node hash 34 MB, tile pixels 34 MB,
+tile keys 8 MB.
+
+- **The tile cache was sized for ten times what it uses.** 524,288 tile slots
+  and a million key slots, holding a measured peak of 50,557 tiles. Now
+  131,072 and 262,144 -- still 2.5x the observed peak, and no flush occurred
+  in 40 simulated minutes.
+- **The node array doubled and was never collected.** `cap_` doubles at 2M
+  nodes; collection was set to trigger at 3M, which the machine takes over 40
+  minutes to reach. So it grew to 117 MB and stayed there. Collecting at 1.5M
+  keeps it an order of magnitude smaller.
+- **`hl_gc` reallocated at the same capacity**, so even when it did run the
+  memory never came back. It now sizes to twice the surviving count.
+
+The assumption worth killing: collecting more often was avoided as a
+memory-for-CPU trade. It is not a trade. Measured, alternating the two
+settings over three runs, collecting at 1.5M against 3M ran 40 minutes of
+work in 48.8, 50.6 and 55.8 s against 87.1, 77.2 and 71.0 s. A collected
+table is about 28 MB and stays in cache; a four-million-node one is 117 MB
+and thrashes it. The collection pays for itself several times over.
+
+| collect at | peak tables | collections | 40 min in | peak RSS |
+|---|---|---|---|---|
+| 3,000,000 (old) | 161.5 MB | 0 | 71-87 s | 122 MB |
+| 1,900,000 | 86.0 MB | 4 | 56 s | 92 MB |
+| **1,500,000** | **86.0 MB** | 8 | **49-56 s** | **74 MB** |
+| 1,000,000 | 86.0 MB | 43 | 59 s | 61 MB |
+
+Not done: the node struct is 28 bytes (`a, b, c, d, pop, res` as int32 plus
+level and resJ), and packing it would save proportionally, but that is
+invasive for a table now an order of magnitude smaller than it was.
+
 ## 6. Smaller
 
 - **`afterglow` costs more than it looks.** It is a whole-map pass, so

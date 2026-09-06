@@ -48,7 +48,11 @@ void hl_init(void) {
   N[0].res = N[1].res = -1; N[1].pop = 1;
   rehash_nodes();
   emptyCache[0] = 0; emptyLen = 1;
-  tMask = (1 << 20) - 1; TK = malloc(sizeof(int32_t) * (tMask + 1)); TV = malloc(sizeof(int32_t) * (tMask + 1)); tileCap = 1 << 19; tiles = malloc((size_t)tileCap * 64); tiles_clear();
+  // Sized from measurement rather than guesswork: the whole machine at 1/8
+  // settles around 45,000 tiles between collections, so 131,072 slots keeps
+  // about three times the headroom the flush threshold wants, for a quarter of
+  // the memory the previous 524,288 took.
+  tMask = (1 << 18) - 1; TK = malloc(sizeof(int32_t) * (tMask + 1)); TV = malloc(sizeof(int32_t) * (tMask + 1)); tileCap = 1 << 17; tiles = malloc((size_t)tileCap * 64); tiles_clear();
 }
 static int32_t join(int32_t a, int32_t b, int32_t c, int32_t d) {
   uint32_t i = hash4(a, b, c, d) & htMask;
@@ -218,11 +222,17 @@ HlGcResult hl_gc(Universe *u) {
   while (added) { added = 0; for (int32_t n = 2; n < count_; n++) if (mark[n] && N[n].res != -1 && !mark[N[n].res]) { PUSH(N[n].res); DRAIN(); added = 1; } }
   int32_t *map = malloc(sizeof(int32_t) * (size_t)count_); int32_t k = 0;
   for (int32_t n = 0; n < count_; n++) map[n] = mark[n] ? k++ : -1;
-  Node *NN = calloc(cap_, sizeof(Node));
+  // Collection usually frees most of the table, and the array has only ever
+  // grown, so hand the memory back: keep room to double before the next growth,
+  // and never enlarge here.
+  int32_t newCap = 1 << 18;
+  while (newCap < k * 2 && newCap < cap_) newCap <<= 1;
+  if (newCap > cap_) newCap = cap_;
+  Node *NN = calloc(newCap, sizeof(Node));
   for (int32_t n = 0; n < count_; n++) if (mark[n]) { Node *m = &NN[map[n]]; *m = N[n];
     if (N[n].level) { m->a = map[N[n].a]; m->b = map[N[n].b]; m->c = map[N[n].c]; m->d = map[N[n].d]; }
     m->res = (N[n].res != -1 && mark[N[n].res]) ? map[N[n].res] : -1; }
-  free(N); N = NN; count_ = k;
+  free(N); N = NN; count_ = k; cap_ = newCap;
   rehash_nodes();
   emptyLen = 1; tiles_clear();
   u->root = map[u->root];
