@@ -66,6 +66,7 @@ static Ctl ctls[] = {
   { "size",        "Size (%)",                T_SLIDER, NULL, 30, 200, 109, 0, 0, "100" },
   { "hpos",        "Horizontal position (%)", T_SLIDER, NULL, 0, 100, 110, 0, 0, "50" },
   { "vpos",        "Vertical position (%)",   T_SLIDER, NULL, 20, 90, 111, 0, 0, "50" },
+  { "monitor",     "Monitor (0 = primary)",   T_COMBO,  "0", 0, 0, 127, 0, 0, "0" },
   { "pm",          "AM/PM indicator",         T_COMBO,  "dot|text|machine|hide", 0, 0, 112, 0, 0, "dot" },
   { "colon",       "Colon",                   T_COMBO,  "pulse|machine|hide", 0, 0, 113, 0, 0, "pulse" },
   { "highlight",   "Highlight changing cells", T_CHECK, NULL, 0, 0, 114, 0, 0, "0" },
@@ -83,6 +84,19 @@ static Ctl ctls[] = {
   { "fade",        "Fade between them (s)",   T_SLIDER, NULL, 0, 20, 126, 0, 0, "3" },
 };
 #define NCTL (int)(sizeof ctls / sizeof ctls[0])
+// The monitor list depends on the machine, so the combo is filled in at run time
+// rather than declared. A value in the ini naming a monitor that is not attached
+// is still offered, so opening the window does not silently discard it.
+static char monitorOpts[96];
+static void build_monitor_options(void) {
+  int n = GetSystemMetrics(SM_CMONITORS); if (n < 1) n = 1;
+  char cur[16]; ini_get("monitor", cur, sizeof cur, "0");   // the file is flat key = value, not sectioned
+  int want = atoi(cur); if (want + 1 > n) n = want + 1;
+  if (n > 16) n = 16;
+  char *p = monitorOpts; *p = 0;
+  for (int i = 0; i < n; i++) p += sprintf(p, i ? "|%d" : "%d", i);
+  for (int i = 0; i < NCTL; i++) if (!strcmp(ctls[i].key, "monitor")) ctls[i].opts = monitorOpts;
+}
 #define ID_STARTUP 200
 #define ID_WATCH 201
 #define ID_OPENINI 202
@@ -154,6 +168,7 @@ int settings_main(const char *ini, const char *exe, const char *dir) {
   strcpy(iniPath, ini); strcpy(exePath, exe); strcpy(exeDir, dir);
   HANDLE mutex = CreateMutexA(NULL, TRUE, "LifeClockSettings"); if (GetLastError() == ERROR_ALREADY_EXISTS) { HWND e = FindWindowA("LifeClockSettings", NULL); if (e) SetForegroundWindow(e); return 0; }
   INITCOMMONCONTROLSEX icc = { sizeof icc, ICC_BAR_CLASSES | ICC_STANDARD_CLASSES }; InitCommonControlsEx(&icc);
+  build_monitor_options();
   typedef UINT (WINAPI *GDFS)(void); GDFS gdfs = (GDFS)GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForSystem"); if (gdfs) dpi = gdfs();
   font = CreateFontA(-S(12), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
   WNDCLASSA wc = { 0 }; wc.lpfnWndProc = proc; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "LifeClockSettings"; wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.hIcon = LoadIconA(wc.hInstance, MAKEINTRESOURCEA(1)); RegisterClassA(&wc);

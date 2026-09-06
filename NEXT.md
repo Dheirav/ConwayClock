@@ -317,6 +317,12 @@ Two things about the sweep worth keeping:
 
 ## 6. Smaller
 
+- **`afterglow` costs more than it looks.** It is a whole-map pass, so
+  `render()` takes the whole-picture path whenever it is on and the partial
+  repaint is disabled: measured on the default view, resample 3.3 ms a frame
+  instead of 1.2. Restricting it would mean tracking a decaying union rather
+  than the live set, since a pixel must keep being touched after it empties.
+  Documented in `docs/SETUP.md` rather than fixed.
 - **Executable size.** 16.6 MB, nearly all snapshot data
   (`native/snapshots_data.c` is 57.7 MB of source, from 16 MB of
   `snapshots/*.rle.gz`). 144 snapshots at 10-minute spacing buy a 1–2 s
