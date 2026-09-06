@@ -178,7 +178,7 @@ From WSL with Zig, no admin, no Windows toolchain:
 ```bash
 Z=~/.local/opt/zig-x86_64-linux-0.14.1/zig
 cd native && $Z cc -target x86_64-windows-gnu -O2 -o life-clock.exe \
-  main.c hashlife.c inflate.c colon.c settings.c install.c snapshots_data.c life-clock.rc \
+  main.c hashlife.c inflate.c colon.c settings.c install.c config.c snapshots_data.c life-clock.rc \
   -lgdi32 -luser32 -ldwmapi -lwtsapi32 -lshell32 -lole32 -luuid -lcomctl32 -lcomdlg32 -ladvapi32 -Wl,--subsystem,windows
 ```
 
@@ -195,6 +195,10 @@ The Linux-side tests, both run by CI on every push:
 
 - `native/test_hl.c` checks the engine against a naive simulator, prints the
   population trace that must match the JavaScript engine, and times it.
+- `native/test_config.c` covers the settings layer: every ini key's parsing,
+  the colour handling, and the clamping that stops a hand-edited file from
+  producing a broken view. `config.c` exists so that this can be built
+  without `windows.h`, which `main.c` cannot.
 - `native/test_clock.c` is the end-to-end one: for a sample of minutes across
   the 24-hour cycle it loads the embedded snapshot, advances to the
   generation the wallpaper would use, reads the seven-segment display back

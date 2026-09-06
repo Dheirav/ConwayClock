@@ -326,9 +326,12 @@ Two things about the sweep worth keeping:
   its output. Turning it into a pre-release gate would mostly mean deciding
   what to assert, given that a minute ending in 7 is legitimately correct for
   only three seconds.
-- **No test for the settings layer.** `apply_setting` and `clamp_settings`
-  (`native/main.c:506`, `:540`) parse every ini key and are exercised only
-  by hand.
+- ~~No test for the settings layer.~~ **Done 2026-09-06.** The config struct,
+  `apply_setting`, `clamp_settings`, `parse_hex_bgr` and `preset_colors` moved
+  out of `main.c` into `native/config.c`, which builds without `windows.h`, so
+  `native/test_config.c` exercises them on Linux in CI: every enumerated key,
+  the BGR colour handling, that clamping rejects out-of-range values and
+  leaves legal ones alone, and that an unknown key is ignored.
 
 ## Ranking
 

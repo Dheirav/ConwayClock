@@ -24,6 +24,9 @@ jobs:
         run: |
           cd native && gcc -O2 -Wno-unused-result -o /tmp/test_hl test_hl.c hashlife.c && /tmp/test_hl ref ../clock.rle
 
+      - name: Settings tests (every ini key, and the clamping)
+        run: cd native && gcc -O2 -o /tmp/test_config test_config.c config.c && /tmp/test_config
+
       - name: Pack snapshots
         run: python3 tools/gen-snapshot-data.py
 
@@ -34,7 +37,7 @@ jobs:
       - name: Build Windows executable
         run: |
           cd native && zig cc -target x86_64-windows-gnu -O2 -o life-clock.exe \
-            main.c hashlife.c inflate.c colon.c settings.c install.c snapshots_data.c life-clock.rc \
+            main.c hashlife.c inflate.c colon.c settings.c install.c config.c snapshots_data.c life-clock.rc \
             -lgdi32 -luser32 -ldwmapi -lwtsapi32 -lshell32 -lole32 -luuid -lcomctl32 -lcomdlg32 -ladvapi32 -Wl,--subsystem,windows
           cp life-clock.exe life-clock.scr
           ls -la life-clock.exe
