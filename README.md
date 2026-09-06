@@ -38,7 +38,7 @@ a new generation lands.
    and Quit. Renamed to `.scr` it is a screensaver that tours the machine.
 
 Cost with the desktop visible: about 3 % of one core at the default 6 fps,
-130 MB of memory, no GPU. Nothing while a window covers the desktop.
+around 75 MB of memory, no GPU. Nothing while a window covers the desktop.
 
 ## Documentation
 

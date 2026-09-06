@@ -29,7 +29,7 @@ step); an open-addressing table for canonicalisation; a tile cache for
 rendering, so a periodic machine renders almost entirely from cache; and a
 compaction pass that keeps only what the current state reaches.
 
-Measured, warm, whole machine: 0.5 to 1 ms per 64-generation step, under
+Measured, warm, whole machine: 0.2 to 0.8 ms per 64-generation step, under
 1 ms to render at 1/8 scale, 100 to 150 MB. A cold start (first simulated
 minute) costs 2 to 3 s. `native/test_hl.c` checks the engine against a
 naive simulator; its bitmap after 90 steps is byte-identical to the
@@ -112,8 +112,9 @@ resample runs over the union of this frame's spans and the last frame's
 rather than the whole rectangle. What that union leaves alone keeps the
 pixels it already had. Anything that invalidates untouched pixels forces a
 whole-picture frame: a resize, a pan, and in particular a day/night fade,
-where the background colour itself moves. `highlight` and `afterglow` are
-whole-map passes in their own right and fall back to the old path.
+where the background colour itself moves, and which repaints the letterbox
+outside the machine's rectangle as well. `highlight` and `afterglow` keep the
+partial repaint by the two-generation epochs described under Rendering.
 Tracking which tiles *changed* rather than which are occupied would not
 help: 95 % of the live tiles differ every frame, because nearly everything
 alive in this machine is a glider in flight.
@@ -168,14 +169,40 @@ with the desktop visible, process CPU sampled over 42 s:
 |---|---|---|---|
 | 6 fps, before the partial repaint | 3.8 to 4.2 % | render 0.6 to 1.0 ms, resample 3.2 to 3.5 ms, blit 0.9 to 1.0 ms | 97 MB working set |
 | 6 fps, after | **3.2 % median**, 2.5 to 3.7 typical | render 0.6 ms, resample 1.4 ms, blit 0.7 ms | 129 MB working set |
+| the same, after the memory work below | not re-measured | unchanged | 74 MB |
 | 3 fps | about half | same per frame | same |
 | Desktop covered, locked or display off | 0 % | no frames | same |
 
-The 6 fps figures after the change are the median of 49 steady minutes on
-the default configuration, taken from the per-minute log line; minutes with
-a short frame count or a catch-up after a pause are excluded, since those
-measure the engine rather than the drawing. Memory moves with the engine's
-node tables between collections and is not a fixed figure.
+The 6 fps figures are the median of 49 steady minutes on the default
+configuration, taken from the per-minute log line; minutes with a short frame
+count or a catch-up after a pause are excluded, since those measure the engine
+rather than the drawing. They were taken before the memory work below, which
+made the engine faster, so they are an upper bound.
+
+Memory moves with the engine's node tables between collections and is not a
+fixed figure. Three things dominated it and two were badly sized:
+
+- The **tile cache** was allocated for 524,288 tiles and a million key slots
+  while using a measured peak of 50,557. It is now 131,072 and 262,144, which
+  is still about 2.5 times the observed peak, and no flush occurred in 40
+  simulated minutes.
+- The **node array** doubles at 2 million nodes, but collection was set to
+  trigger at 3 million, which this machine takes over 40 minutes to reach. So
+  in practice it always doubled to 117 MB and was never collected. Collecting
+  at 1.5 million keeps it an order of magnitude smaller.
+- `hl_gc` **reallocated at the same capacity**, so even when it ran the memory
+  never came back. It now sizes to twice the surviving node count.
+
+Collecting more often is not the trade it looks like. Alternating the two
+settings over three runs, collecting at 1,500,000 rather than 3,000,000 ran
+the same 40 minutes of work in 48.8, 50.6 and 55.8 s against 87.1, 77.2 and
+71.0 s -- about 40 % faster. A collected table is around 28 MB and stays in
+cache; a four-million-node one is 117 MB and thrashes it.
+
+Those figures, and the 74 MB, are peak RSS from a Linux harness stepping the
+engine and rendering the default view for 40 simulated minutes. The Windows
+working set over a long visible run has not been re-measured since; the
+process reads 74 MB idle, against 129 MB before.
 
 GPU: none measurable; the program draws on the CPU into a bitmap that
 Windows composites like a static wallpaper. For comparison, the same clock
@@ -203,7 +230,7 @@ shows progress with an ETA from the measured rate. `tools/hashlife.js` is
 the JavaScript engine those tools use and `tools/reader.js` reads the
 7-segment display from a universe, for tests.
 
-The Linux-side tests, both run by CI on every push:
+The Linux-side tests, all run by CI on every push:
 
 - `native/test_hl.c` checks the engine against a naive simulator, prints the
   population trace that must match the JavaScript engine, and times it.

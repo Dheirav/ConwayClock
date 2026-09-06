@@ -21,7 +21,8 @@ Baseline verified on 2026-09-05, all four stages green:
 | `test_clock`, 12 times across the cycle | 0 failed, 13.3 s |
 | Windows build (Zig, `x86_64-windows-gnu`) | clean, 16,615,936 bytes |
 
-Runtime figures below (4 % of one core, 97 MB, the per-frame split) are the
+Runtime figures below (4 % of one core, 97 MB, the per-frame split) are, unless
+said otherwise, the
 ones measured on the RTX 4060 laptop and recorded in
 [`docs/HOW-IT-WORKS.md`](docs/HOW-IT-WORKS.md), not re-measured here.
 

@@ -65,7 +65,7 @@ life-clock.exe --fullscreen 1
 or "Watch full screen" from the tray menu. It opens a normal window covering
 the screen at 1/4 zoom, centred on the digits, synced like the wallpaper.
 Esc, Q or a click closes it; + and - (or up/down) zoom between 1/16 and
-1/1; the arrow keys and Page Up/Down pan; T starts or stops the tour. It runs alongside the wallpaper,
+1/1; left and right, and Page Up/Down, pan; T starts or stops the tour. It runs alongside the wallpaper,
 which pauses while the window covers the desktop.
 
 ## Start at login
@@ -85,9 +85,12 @@ Right-click the tray icon and choose Settings, or run
 `life-clock.exe --settings`. A window with a control for every setting:
 palette and colour pickers, sliders for brightness, size and position,
 drop-downs for frame rate, view, zoom, monitor, AM/PM, colon and tour, checkboxes
-for highlight, status line and start with Windows. Every change is written
-to `life-clock.ini` at once and the running wallpaper picks it up within
-two seconds. Shift-click a colour button to set it to `none`.
+for highlight, status line and start with Windows. `attach`, and the
+developer keys `fullscreen`, `frames` and `frame_step`, have no control and
+must be set in the file. Every change is written to `life-clock.ini` at once
+and the running wallpaper picks it up within two seconds. Shift-click the
+dense-area colour to set it to `none`; the other colour buttons have no such
+state and always open the picker.
 
 The file itself is plain text with comments (a copy is in
 `native/life-clock.sample.ini`) and can be edited directly; the wallpaper
@@ -96,10 +99,10 @@ as `--key value`, which overrides the file.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `fps` | 6 | Frames per second: 3, 6, 12 or 24. Generations per frame = 192 / fps. The one setting that changes CPU use: roughly 2 %, 4 %, 8 %, 16 % of one core |
+| `fps` | 6 | Frames per second: 3, 6, 12 or 24. Generations per frame = 192 / fps. The setting that changes CPU use most: measured about 3 % of one core at 6 and 6.5 % at 12, roughly proportional either side |
 | `battery_fps` | 3 | Frame rate while on battery: 1, 3, 6, 12 or 24 |
-| `view` | whole | `whole` shows the machine; `display` shows only the 7-segment display |
-| `size` | 1.0 | Relative to the largest fit: 0.5 is half size, above 1 crops |
+| `view` | whole | `whole` shows the machine; `display` shows only the 7-segment display. Read only when `zoom` is `auto`: a fixed zoom sets the view from `zoom`, `size`, `hpos` and `vpos` instead, and ignores this |
+| `size` | 1.0 | With `zoom = auto`, relative to the largest fit: 0.5 is half size, above 1 crops. With a fixed `zoom` it is a second zoom factor instead -- 0.5 shows twice as much of the machine rather than drawing it half-size -- which is the path watch mode always takes |
 | `hpos` | 0.5 | Where the digits' centre sits horizontally, as a fraction of the screen width |
 | `vpos` | 0.5 | Same vertically. At 0.5 the top of the machine is cropped; 0.78 shows all of it |
 | `monitor` | 0 | Monitor index, 0 = primary. Tested on two monitors; the wallpaper draws on the one chosen, and the others keep the Windows wallpaper |
@@ -107,22 +110,31 @@ as `--key value`, which overrides the file.
 | `day_start`, `night_start` | 7, 19 | Hours at which day and night begin, when `theme = clock` |
 | `day_palette`, `night_palette` | white, amber | A preset name or an RRGGBB colour for each half of the day |
 | `day_gain`, `night_gain` | 40, 22 | Brightness for each; night is dimmer by default |
-| `fade` | 3 | Seconds the change from one to the other takes. 0 is instant |
+| `fade` | 3 | Seconds the change from one to the other takes, 0 to 30. 0 is instant. The settings window's slider covers 0 to 20 |
 | `palette` | amber | Used when `theme = off`: `amber`, `green`, `white`, `blue` or `red` |
 | `bg`, `cells` | | Your own background and cell colours as RRGGBB; override the palette |
 | `cells2` | none | If set, the densest areas fade from `cells` to this colour |
-| `gain` | 40 | Brightness of a single live cell in a zoomed-out pixel, 5 to 120 |
+| `gain` | 40 | Brightness of a single live cell in a zoomed-out pixel. The file accepts 1 to 255; the settings window's slider covers 5 to 120 |
 | `pm` | dot | AM/PM. The machine has a box that is an outline in the morning and filled in the afternoon, next to a static "PM" label. `dot`: blank both, draw a filled dot beside the digits when the box says PM. `text`: keep the box, write AM or PM beside it. `machine`: show the corner as drawn. `hide`: blank it |
 | `colon` | pulse | The pattern's colon is two discs of still-life blocks. `pulse`: replace them with discs of pulsars so the dots breathe under Life's rules. `machine`: keep the blocks. `hide`: remove them |
 | `highlight` | 0 | 1 colours cells that changed since the last frame in the `hot` colour (default c8e9ff), so the working parts of the machine stand out from the static hardware |
 | `tour` | auto | In watch mode and the screensaver, pan slowly around the machine: display, digits, colon, lookup tables, clock distribution, timebase, counters. `auto` is on for the screensaver and off for watch mode; T toggles it in the window |
-| `afterglow` | 0 | 0 is off; 0.5 to 0.9 leaves fading trails behind moving cells, one pass over the area the trails reach. Costs about 0.4 ms a frame. Most useful at zoom 4 or closer |
-| `zoom` | auto | `auto` fits the view to the screen (1/8 for the whole machine). `8`, `4`, `2` or `1` fix the cells per pixel, centred on the digits with `hpos`/`vpos`; 4 shows individual gliders. Watch mode defaults to 4 |
+| `afterglow` | 0 | 0 is off; 0.5 to 0.9 leaves fading trails behind moving cells, one pass over the area the trails reach. Accepts up to 0.95. Costs about 0.4 ms a frame. Most useful at zoom 4 or closer |
+| `zoom` | auto | `auto` fits the view to the screen (1/8 for the whole machine). `16`, `8`, `4`, `2` or `1` fix the cells per pixel, centred on the digits with `hpos`/`vpos`; 4 shows individual gliders. Watch mode defaults to 4. The settings window omits `16`, so a view zoomed that far out from the keyboard cannot be seen there |
 | `status` | 0 | Small line in the corner with generation, target and engine statistics |
-| `attach` | 7 | How the window is attached to the desktop; see troubleshooting |
+| `hot` | c8e9ff | Colour used for changed cells when `highlight` is on |
+| `attach` | 7 | How the window is attached to the desktop; see troubleshooting. `4`, `6` and `8` also exist as diagnostics -- `6` in particular puts a **topmost** window over the whole screen, so do not work through the numbers in order |
 
-Only `fps` and `battery_fps` affect resource use. Colours and layout are
-applied once per change.
+Three more keys exist for development and are not meant for ordinary use:
+`fullscreen` (start in the watch window), `frames` and `frame_step` (used with
+the `--frame` switch to write bitmaps). The command line also accepts
+`--frame`, `--gen`, `--selfcheck` and `--status`.
+
+`fps` and `battery_fps` dominate the cost, but they are not the only keys
+that affect it: `zoom`, `view` and `size` change how much map is resampled
+each frame, `afterglow` and `highlight` add a pass over the area their trails
+reach, and `status` draws text on every frame. Colours are applied once per
+change and cost nothing while running.
 
 ## What the display does over a minute
 
@@ -177,8 +189,9 @@ notes in [How it works](HOW-IT-WORKS.md); `attach = N` in the ini forces
 one.
 
 **It shows the wrong time.** The machine is synced to the local clock at
-start and resynced if it drifts more than a minute; a time-zone or clock
-change is picked up within a minute. Check `synced to gen ...` in the log.
+start. If it is ever ahead of the clock, or more than half an hour behind,
+it reloads the nearest snapshot; smaller lags are closed by fast-forwarding.
+A time-zone or clock change is picked up within a minute. Check `synced to gen ...` in the log.
 
 **It seems frozen.** Look for `paused` in the log: something covers the
 desktop, including a maximised window. Show the desktop.
