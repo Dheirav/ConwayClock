@@ -156,47 +156,40 @@ to the whole-picture path, so measure with both off, which is the default.
 
 ## 2. Multi-monitor
 
-Not "untested" -- **not implemented**, and 2026-09-05 found the specific
-reason.
+**Done, and verified on real hardware 2026-09-06.** `monitor = 1` puts the
+wallpaper on the second display.
 
-`attach_to_desktop` parents the window inside `SHELLDLL_DefView` and then
-positioned it at `g_monX, g_monY`, which are *screen* coordinates from
-`pick_monitor`. Once `SetParent` has made it a child, a window's position is
-in its **parent's client** coordinates. Those coincide only for the primary
-monitor, where both are (0,0), which is why this never showed. Measured on
-the real desktop, DefView is exactly the primary monitor:
+The bug was that `attach_to_desktop` parented the window inside
+`SHELLDLL_DefView` and then positioned it at `g_monX, g_monY`, which are
+*screen* coordinates from `pick_monitor`. Once `SetParent` has made a window
+a child, its position is in the **parent's client** coordinates. Those
+coincide only for the primary monitor, where both are (0,0), which is why it
+never showed. Child strategies now convert through `ScreenToClient` and the
+top-level ones use the monitor's own origin.
+
+**A premise recorded here earlier was wrong.** It said `SHELLDLL_DefView`
+covers the primary monitor only, so a child of it could never be seen on
+another display and the whole approach would need replacing. Measured with a
+second monitor actually attached:
 
 ```
-Progman            (0,0)-(1920,1080)  exstyle WS_EX_NOREDIRECTIONBITMAP
-  SHELLDLL_DefView (0,0)-(1920,1080)
+placement: window (1920,0)-(3840,1080); parent screen (0,0)-(3840,1080)
 ```
 
-So a second display at x=1920 would place the child at DefView-client
-(1920, 0) -- entirely outside its parent, clipped to nothing. The other
-strategies are no better: 1 through 4 pass `0,0` or `SWP_NOMOVE`, and 5 and 6
-were pinned to screen (0,0). None honoured a non-primary monitor.
+DefView spans the **whole virtual desktop**. It looked primary-only because
+with one monitor that is the whole desktop. So the coordinate fix was the
+entire fix, and no fallback was needed.
 
-Fixed so far: the coordinate space (`ScreenToClient` for child strategies,
-the monitor origin for top-level ones), plus a `placement:` log line giving
-the window rect, the parent rect and its client size, which says outright
-when the window has landed outside its parent. Verified on the primary
-monitor -- window (0,0)-(1920,1080) exactly filling its parent, no clipping,
-no change in behaviour.
+The fallback built alongside it -- `report_placement` returning whether any
+of the window survives the parent's clip, and `detach_to_toplevel` dropping
+`WS_CHILD` for a bottom-of-z-order window over the monitor -- never fires in
+this configuration. It stays as insurance for a shell layout where DefView
+does not cover a monitor, and it is exercised by building a binary that adds
+the screen width to the monitor origin.
 
-**Still unverified on an actual second monitor**, and the coordinate fix
-alone may well not be enough: a child is clipped to its parent, and if
-DefView only ever covers the primary monitor then strategy 7 cannot host a
-second one at all. A second display would then need the top-level route
-(`attach = 5`) placed at the monitor's rect, or a per-monitor instance, which
-collides with the single-instance mutex. The `placement:` line answers which
-in one run.
-
-An attempt to test it over Miracast on 2026-09-05 failed for reasons with
-nothing to do with this code: the sink advertised its Wi-Fi Direct group on
-channel 1 while the laptop was associated on channel 52, a DFS channel, where
-Wi-Fi Direct groups are not permitted. Tailscale was ruled out by stopping
-the service. Testing needs a display that does not depend on the Wi-Fi
-channel plan.
+Not tried: two monitors at once. The program draws on one, chosen by
+`monitor`. Spanning, or an instance per monitor, would still be new work, and
+the single-instance mutex is in the way of the second.
 
 ## 3. The screensaver preview
 

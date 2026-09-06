@@ -102,7 +102,7 @@ as `--key value`, which overrides the file.
 | `size` | 1.0 | Relative to the largest fit: 0.5 is half size, above 1 crops |
 | `hpos` | 0.5 | Where the digits' centre sits horizontally, as a fraction of the screen width |
 | `vpos` | 0.5 | Same vertically. At 0.5 the top of the machine is cropped; 0.78 shows all of it |
-| `monitor` | 0 | Monitor index, 0 = primary. Multi-monitor is untested |
+| `monitor` | 0 | Monitor index, 0 = primary. Tested on two monitors; the wallpaper draws on the one chosen, and the others keep the Windows wallpaper |
 | `theme` | off | Day/night switching. `off` uses the single palette below. `clock` switches at `day_start` and `night_start`. `system` follows the Windows light/dark app theme |
 | `day_start`, `night_start` | 7, 19 | Hours at which day and night begin, when `theme = clock` |
 | `day_palette`, `night_palette` | white, amber | A preset name or an RRGGBB colour for each half of the day |
