@@ -213,7 +213,8 @@ handle at a low frame rate.
 
 ## 4. CI and the Windows code
 
-**Done 2026-09-05**, except for one gap noted at the end.
+**Done.** The job runs on a real runner and gates releases; what is left
+is noted at the end.
 
 `.github/workflows/build.yml` gains a `windows-check` job: it takes the exe
 the Linux job already uploads as an artifact, and on a `windows-latest`
@@ -231,13 +232,10 @@ building, both resample paths and the partial repaint's correctness.
 
 Still open:
 
-- **It does not gate releases.** The `Release` step lives in the `build`
-  job, which finishes before `windows-check` runs, so a tagged build
-  publishes whether or not the Windows check passes. Closing that means
-  splitting `Release` into its own job with
-  `needs: [build, windows-check]` -- straightforward, but it touches the
-  publishing path, so it is worth doing deliberately rather than as a
-  side effect.
+- ~~It does not gate releases.~~ **Done 2026-09-05.** `Release` is its own
+  job with `needs: [build, windows-check]`, taking the binaries from the
+  artifact the build job uploads, so a tagged build cannot publish unless the
+  Windows check has passed.
 - ~~The frame is checked for being a picture, not the right picture.~~
   **Done 2026-09-05.** `tools/read-frame.py` reads the seven segments off
   the BMP, using a `geometry:` line the program now logs to map pattern
@@ -263,8 +261,12 @@ Still open:
       python3 -c "import yaml; ..."   # write each pwsh run: block to a file
       [System.Management.Automation.Language.Parser]::ParseFile(...)
 
-- **Still unverified on a runner** beyond the parse: nobody has yet confirmed
-  a `windows-latest` runner gives the process a display GDI is happy with.
+- ~~Still unverified on a runner.~~ **Verified 2026-09-06.** The job runs on
+  `windows-latest`: all three configurations render, the partial repaint is
+  exact (0 of 786,432 pixels differ, the runner being 1024x768), and the three
+  `--gen` frames read back as 12:05 PM, 6:00 PM and 12:00 AM. The frame reader
+  transferred to a display it was never tuned for -- segment brightnesses of
+  169/72/31 there against 175/75/31 locally, threshold 52 against 53.
 
 ## 5. The display lag
 
