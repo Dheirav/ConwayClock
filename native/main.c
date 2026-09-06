@@ -109,6 +109,14 @@ static int dstX, dstY, dstW, dstH;   // where the view lands on screen (letterbo
 // the picture standing. Anything that invalidates untouched pixels -- a palette
 // ease, a pan, a resize -- must set fullRepaint.
 static HlSpan *rowSpan, *prevRowSpan;
+// afterglow and highlight leave a decaying tail, so the pixels they touch
+// outlive the span that produced them: glow keeps a decaying maximum and chg a
+// decaying record of change, and both must go on being stepped after the
+// content has moved on. Two generations of unioned spans cover that tail: a
+// pixel outside both has not been live for at least decayFrames, which is how
+// long 255 takes to decay below 1, so whatever it held is now zero.
+static HlSpan *epochA, *epochB, *effSpan;
+static int epochFrame, decayFrames = 2;
 static int *invX;        // invX[k] = first output column that reads map column k
 static int *oLo, *oHi;   // per map row, the output columns needing recompute
 static int fullRepaint = 1;
@@ -133,9 +141,13 @@ static uint8_t *prevDens, *chg; // last frame's density and a decaying change ma
 // Called at the end of each setup_view branch, once mapX/dstW/view are settled.
 static void build_span_tables(void) {
   free(rowSpan); free(prevRowSpan); free(oLo); free(oHi); free(invX);
+  free(epochA); free(epochB); free(effSpan);
   rowSpan = malloc(sizeof(HlSpan) * view.ph); prevRowSpan = malloc(sizeof(HlSpan) * view.ph);
+  epochA = malloc(sizeof(HlSpan) * view.ph); epochB = malloc(sizeof(HlSpan) * view.ph); effSpan = malloc(sizeof(HlSpan) * view.ph);
   oLo = malloc(sizeof(int) * view.ph); oHi = malloc(sizeof(int) * view.ph);
-  for (int y = 0; y < view.ph; y++) { rowSpan[y].lo = prevRowSpan[y].lo = view.pw; rowSpan[y].hi = prevRowSpan[y].hi = 0; }
+  for (int y = 0; y < view.ph; y++) { rowSpan[y].lo = prevRowSpan[y].lo = epochA[y].lo = epochB[y].lo = effSpan[y].lo = view.pw;
+                                      rowSpan[y].hi = prevRowSpan[y].hi = epochA[y].hi = epochB[y].hi = effSpan[y].hi = 0; }
+  epochFrame = 0;
   invX = malloc(sizeof(int) * (view.pw + 2));
   for (int k = 0; k <= view.pw + 1; k++) invX[k] = dstW;
   for (int x = dstW - 1; x >= 0; x--) invX[mapX[x]] = x;
@@ -219,20 +231,28 @@ static void tour_center(double t, double *cx, double *cy) {
 static void set_center(double cx, double cy) { view.x = (int)(cx - view.w / 2.0); view.y = (int)(cy - view.h / 2.0); fullRepaint = 1; }
 static double tRender, tResample, tPresent; static LARGE_INTEGER qpf; static int pmLit; static HFONT pmFont; static int pmFontH;
 static double qnow(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return (double)t.QuadPart * 1000.0 / qpf.QuadPart; }
+// Frames a decaying effect takes to fall from 255 to nothing; the repaint must
+// keep covering a pixel for that long after it stops being live.
+static int effect_decay_frames(void) {
+  int n = 2;
+  if (cfg.highlight) n = 23;                        // chg *= 200/256 each frame
+  if (cfg.afterglow > 0) {
+    double k = cfg.afterglow < 0.01 ? 0.01 : cfg.afterglow;
+    int f = (int)(log(1.0 / 255.0) / log(k)) + 1;   // 255 * k^f < 1
+    if (f < 2) f = 2; if (f > 240) f = 240;
+    if (f > n) n = f;
+  }
+  return n;
+}
 static void render(void) {
   double a = qnow();
-  // highlight and afterglow are whole-map passes over dens/prevDens/chg/glow,
-  // so spans buy nothing while either is on; take the old path then.
-  int full = fullRepaint || cfg.afterglow > 0 || cfg.highlight;
-  if (full) {
-    hl_density_cached(&uni, view.x, view.y, view.pw, view.ph, view.z, dens);
-    for (int y = 0; y < view.ph; y++) { rowSpan[y].lo = 0; rowSpan[y].hi = view.pw; }
-    fullRepaint = 0;
-  } else {
-    for (int y = 0; y < view.ph; y++) if (prevRowSpan[y].lo < prevRowSpan[y].hi)
-      memset(dens + (size_t)y * view.pw + prevRowSpan[y].lo, 0, (size_t)(prevRowSpan[y].hi - prevRowSpan[y].lo));
-    hl_density_spans(&uni, view.x, view.y, view.pw, view.ph, view.z, dens, rowSpan);
-  }
+  // Clear last frame's ranges rather than the whole map, then fill from the
+  // engine, which reports what it touched. fullRepaint forces the *screen* to be
+  // redrawn whole; it deliberately does not widen the spans, because dens is
+  // correct either way and widening them would poison the effect epochs below.
+  for (int y = 0; y < view.ph; y++) if (prevRowSpan[y].lo < prevRowSpan[y].hi)
+    memset(dens + (size_t)y * view.pw + prevRowSpan[y].lo, 0, (size_t)(prevRowSpan[y].hi - prevRowSpan[y].lo));
+  hl_density_spans(&uni, view.x, view.y, view.pw, view.ph, view.z, dens, rowSpan);
   // The machine's AM/PM indicator: a box (pattern x 100..680, y 4150..4750) that is an
   // outline in the morning and filled in the afternoon, next to a static "PM" label
   // (x 700..1450). pm=text keeps the box, blanks the label, and writes AM or PM from
@@ -245,13 +265,38 @@ static void render(void) {
     if (lx0 < 0) lx0 = 0; if (ly0 < 0) ly0 = 0; if (lx1 > view.pw) lx1 = view.pw; if (ly1 > view.ph) ly1 = view.ph;
     for (int y = ly0; y < ly1; y++) memset(dens + (size_t)y * view.pw + lx0, 0, lx1 > lx0 ? lx1 - lx0 : 0);
   }
+  if (cfg.afterglow > 0 || cfg.highlight) {
+    // Roll the epochs: this frame's live span joins the current generation, and
+    // when a generation is decayFrames old it becomes the previous one. Their
+    // union covers every pixel that can still hold glow or change.
+    decayFrames = effect_decay_frames();
+    for (int y = 0; y < view.ph; y++) if (rowSpan[y].lo < rowSpan[y].hi) {
+      if (rowSpan[y].lo < epochA[y].lo) epochA[y].lo = rowSpan[y].lo;
+      if (rowSpan[y].hi > epochA[y].hi) epochA[y].hi = rowSpan[y].hi; }
+    if (++epochFrame >= decayFrames) { epochFrame = 0;
+      memcpy(epochB, epochA, sizeof(HlSpan) * (size_t)view.ph);
+      for (int y = 0; y < view.ph; y++) { epochA[y].lo = view.pw; epochA[y].hi = 0; } }
+    for (int y = 0; y < view.ph; y++) {
+      effSpan[y].lo = epochA[y].lo < epochB[y].lo ? epochA[y].lo : epochB[y].lo;
+      effSpan[y].hi = epochA[y].hi > epochB[y].hi ? epochA[y].hi : epochB[y].hi; }
+  }
   if (cfg.highlight) { // change map: how much each map pixel differed from the last frame, decaying
-    size_t n = (size_t)view.pw * view.ph;
-    for (size_t i = 0; i < n; i++) { int d = dens[i] - prevDens[i]; if (d < 0) d = -d; d *= 24; if (d > 255) d = 255; int c = (chg[i] * 200) >> 8; chg[i] = (uint8_t)(d > c ? d : c); }
-    memcpy(prevDens, dens, n); }
+    const int pw_ = view.pw;
+    for (int y = 0; y < view.ph; y++) { int lo = effSpan[y].lo, hi = effSpan[y].hi; if (lo >= hi) continue;
+      uint8_t *d = dens + (size_t)y * pw_, *p = prevDens + (size_t)y * pw_, *c = chg + (size_t)y * pw_;
+      for (int x = lo; x < hi; x++) { int v = d[x] - p[x]; if (v < 0) v = -v; v *= 24; if (v > 255) v = 255; int q = (c[x] * 200) >> 8; c[x] = (uint8_t)(v > q ? v : q); }
+      memcpy(p + lo, d + lo, (size_t)(hi - lo)); } }
   if (cfg.afterglow > 0) { // trails: each map pixel keeps a decaying maximum of what has been there
-    int k = (int)(cfg.afterglow * 256); size_t n = (size_t)view.pw * view.ph;
-    for (size_t i = 0; i < n; i++) { int v = dens[i], g = glow[i]; if (v > g) g = v; dens[i] = (uint8_t)g; glow[i] = (uint8_t)((g * k) >> 8); } }
+    int k = (int)(cfg.afterglow * 256); const int pw_ = view.pw;
+    for (int y = 0; y < view.ph; y++) { int lo = effSpan[y].lo, hi = effSpan[y].hi; if (lo >= hi) continue;
+      uint8_t *d = dens + (size_t)y * pw_, *g = glow + (size_t)y * pw_;
+      for (int x = lo; x < hi; x++) { int v = d[x], q = g[x]; if (v > q) q = v; d[x] = (uint8_t)q; g[x] = (uint8_t)((q * k) >> 8); } } }
+  // dens now holds glow out to effSpan, so that is where it may be non-zero and
+  // therefore what the next frame has to clear and this frame has to repaint.
+  if (cfg.afterglow > 0 || cfg.highlight)
+    for (int y = 0; y < view.ph; y++) if (effSpan[y].lo < effSpan[y].hi) {
+      if (effSpan[y].lo < rowSpan[y].lo) rowSpan[y].lo = effSpan[y].lo;
+      if (effSpan[y].hi > rowSpan[y].hi) rowSpan[y].hi = effSpan[y].hi; }
   // The AM/PM dot and the AM/PM text are drawn over the map by GDI below, so
   // the map's own spans do not cover them and a cleared dot would linger.
   if (cfg.pmMode >= 2) force_span(0, 4000, 2400, 5900);
@@ -261,9 +306,11 @@ static void render(void) {
   for (int y = 0; y < ph; y++) {
     int lo = rowSpan[y].lo < prevRowSpan[y].lo ? rowSpan[y].lo : prevRowSpan[y].lo;
     int hi = rowSpan[y].hi > prevRowSpan[y].hi ? rowSpan[y].hi : prevRowSpan[y].hi;
+    if (fullRepaint) { lo = 0; hi = pw; }
     if (lo >= hi) { oLo[y] = dstW; oHi[y] = 0; continue; }   // empty: an interval that widens no union in pass 2
     oLo[y] = invX[lo > 0 ? lo - 1 : 0]; oHi[y] = invX[hi < pw ? hi : pw];
   }
+  fullRepaint = 0;
   memcpy(prevRowSpan, rowSpan, sizeof(HlSpan) * (size_t)ph);
   double b = qnow(); tRender += b - a;
   if (unitScale) { // one map pixel per screen pixel: palette lookup only
@@ -785,23 +832,31 @@ int main(int argc, char **argv) {
     while (target - uni.generation >= (forceGen > 0 ? 1 : GPS)) { int64_t step = target - uni.generation; if (step > PERIOD) step = PERIOD; hl_advance(&uni, step); if (!forceGen) target = target_generation(); }
     QueryPerformanceCounter(&t1); logmsg("synced to gen %lld in %.1f s", (long long)uni.generation, (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart);
     render(); if (cfg.afterglow > 0 || cfg.highlight) for (int i = 0; i < 8; i++) { hl_advance(&uni, 32); render(); } GdiFlush();
-    if (selfCheck && (cfg.highlight || cfg.afterglow > 0)) {
-      // Both keep state between renders -- chg decays and prevDens is replaced,
-      // glow decays -- so rendering the same generation twice does not give the
-      // same picture, and both force the whole-picture path anyway, leaving no
-      // partial repaint to check.
-      logmsg("render self-check skipped: highlight/afterglow keep state between renders and take the whole-picture path");
-    } else if (selfCheck) { // does the partial repaint draw the same picture as the whole one?
+    if (selfCheck) { // does the partial repaint draw the same picture as the whole one?
       size_t np = (size_t)W * H; uint32_t *ref = malloc(np * 4); int worst = 0, n = 0;
       double pR = 0, pS = 0, fR = 0, fS = 0;
+      size_t nmap = (size_t)view.pw * view.ph;
+      uint8_t *glowSave = malloc(nmap), *chgSave = malloc(nmap), *prevSave = malloc(nmap);
+      HlSpan *epochASave = malloc(sizeof(HlSpan) * view.ph), *epochBSave = malloc(sizeof(HlSpan) * view.ph);
       for (int i = 0; i < 32; i++) {
         // Three partial frames in a row before comparing. The first frame after
         // a whole-picture repaint still covers the full width, because each row's
         // span is unioned with the previous frame's; only by the third is the
         // repaint actually narrow, which is the case worth checking.
-        for (int k = 0; k < 3; k++) { hl_advance(&uni, 32); if (k == 2) tRender = tResample = 0; render(); }
+        size_t nm = (size_t)view.pw * view.ph, ns = sizeof(HlSpan) * (size_t)view.ph;
+        int epochFrameSave = 0;
+        for (int k = 0; k < 3; k++) { hl_advance(&uni, 32);
+          if (k == 2) { tRender = tResample = 0;
+            // afterglow and highlight step their state on every render, so the
+            // comparison render must start from the state this one starts from,
+            // or it decays twice and rolls the epoch twice.
+            memcpy(glowSave, glow, nm); memcpy(chgSave, chg, nm); memcpy(prevSave, prevDens, nm);
+            memcpy(epochASave, epochA, ns); memcpy(epochBSave, epochB, ns); epochFrameSave = epochFrame; }
+          render(); }
         GdiFlush(); pR += tRender; pS += tResample;
         memcpy(ref, pixels, np * 4);
+        memcpy(glow, glowSave, nm); memcpy(chg, chgSave, nm); memcpy(prevDens, prevSave, nm);
+        memcpy(epochA, epochASave, ns); memcpy(epochB, epochBSave, ns); epochFrame = epochFrameSave;
         tRender = tResample = 0; fullRepaint = 1; render(); GdiFlush();   // same generation, whole picture
         fR += tRender; fS += tResample; n++;
         size_t diff = 0; for (size_t k = 0; k < np; k++) if (ref[k] != pixels[k]) diff++;
@@ -811,7 +866,7 @@ int main(int argc, char **argv) {
       logmsg("render self-check: worst frame differed in %d pixels (0 = the partial repaint is exact)", worst);
       logmsg("self-check timing over %d frames: partial %.2f ms (render %.2f + resample %.2f); whole picture %.2f ms (render %.2f + resample %.2f)",
              n, (pR + pS) / n, pR / n, pS / n, (fR + fS) / n, fR / n, fS / n);
-      free(ref);
+      free(ref); free(glowSave); free(chgSave); free(prevSave); free(epochASave); free(epochBSave);
     }
     if (cfg.frames > 1) { tourStart = 0; for (int i = 0; i < cfg.frames; i++) { char fn[MAX_PATH]; snprintf(fn, sizeof fn, "%s_%03d.bmp", cfg.frame, i);
         if (cfg.tour > 0 && cfg.zoom) { double cx, cy; tour_center(i / 6.0, &cx, &cy); set_center(cx, cy); }

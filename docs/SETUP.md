@@ -116,7 +116,7 @@ as `--key value`, which overrides the file.
 | `colon` | pulse | The pattern's colon is two discs of still-life blocks. `pulse`: replace them with discs of pulsars so the dots breathe under Life's rules. `machine`: keep the blocks. `hide`: remove them |
 | `highlight` | 0 | 1 colours cells that changed since the last frame in the `hot` colour (default c8e9ff), so the working parts of the machine stand out from the static hardware |
 | `tour` | auto | In watch mode and the screensaver, pan slowly around the machine: display, digits, colon, lookup tables, clock distribution, timebase, counters. `auto` is on for the screensaver and off for watch mode; T toggles it in the window |
-| `afterglow` | 0 | 0 is off; 0.5 to 0.9 leaves fading trails behind moving cells. Not cheap: it is a pass over every pixel, and because of that it turns off the partial repaint, so the resample costs about 3.3 ms a frame instead of 1.2. Most useful at zoom 4 or closer |
+| `afterglow` | 0 | 0 is off; 0.5 to 0.9 leaves fading trails behind moving cells, one pass over the area the trails reach. Costs about 0.4 ms a frame. Most useful at zoom 4 or closer |
 | `zoom` | auto | `auto` fits the view to the screen (1/8 for the whole machine). `8`, `4`, `2` or `1` fix the cells per pixel, centred on the digits with `hpos`/`vpos`; 4 shows individual gliders. Watch mode defaults to 4 |
 | `status` | 0 | Small line in the corner with generation, target and engine statistics |
 | `attach` | 7 | How the window is attached to the desktop; see troubleshooting |

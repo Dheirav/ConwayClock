@@ -79,13 +79,14 @@ jobs:
           # default: the shipping configuration. zoom 4: cfg.size 1.0 makes it the
           # unitScale path, which the resample treats separately. highlight: a
           # whole-map pass that deliberately falls back to the full repaint.
-          # highlight keeps state between renders and forces the whole-picture
-          # path, so there is no partial repaint to compare: it is here to prove
-          # that path still renders, not to be self-checked.
+          # afterglow and highlight leave a decaying tail, so the repaint has to
+          # keep covering pixels after they stop being live; these check that it
+          # does, which is the case most likely to leave something stale.
           $cases = @(
-            @{ name = "default";   args = @();                    expect = "worst frame differed in 0 pixels" },
-            @{ name = "zoom4";     args = @("--zoom", "4");        expect = "worst frame differed in 0 pixels" },
-            @{ name = "highlight"; args = @("--highlight", "1");   expect = "render self-check skipped" }
+            @{ name = "default";   args = @();                     expect = "worst frame differed in 0 pixels" },
+            @{ name = "zoom4";     args = @("--zoom", "4");         expect = "worst frame differed in 0 pixels" },
+            @{ name = "highlight"; args = @("--highlight", "1");    expect = "worst frame differed in 0 pixels" },
+            @{ name = "afterglow"; args = @("--afterglow", "0.95"); expect = "worst frame differed in 0 pixels" }
           )
 
           foreach ($c in $cases) {

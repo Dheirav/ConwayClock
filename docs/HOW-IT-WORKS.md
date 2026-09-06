@@ -148,7 +148,12 @@ with a full frame count. The palette actually drawn eases toward
 the configured one, so a day/night switch fades over `fade` seconds instead
 of jumping. Optional passes on the density map: afterglow (a decaying maximum per pixel) and highlight (a
 decaying record of how much each pixel changed, selecting a second
-palette). The AM/PM dot and the colon replacement are the only additions
+palette). Both leave a tail that outlives the content which made it, so they
+run over two generations of unioned spans rather than the live one: a pixel
+outside both has not been live for as long as it takes 255 to decay below 1,
+so whatever it held is already zero. That keeps the partial repaint working
+with either effect on -- measured on the default view, 2.0 ms a frame with
+afterglow against 4.0 with the whole-picture path. The AM/PM dot and the colon replacement are the only additions
 to the picture; both are driven
 by the machine's own state (the dot by the indicator box's cell count, the
 colon by swapping the still-life discs for pulsar discs at load, in a
